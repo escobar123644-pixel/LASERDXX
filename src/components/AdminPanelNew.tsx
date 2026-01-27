@@ -56,24 +56,4 @@ export const AdminPanel: React.FC = () => {
           value={newOpName}
           onChange={(e) => setNewOpName(e.target.value)}
           placeholder="NEW NAME..."
-          className="flex-1 bg-slate-950 border border-slate-700 p-2 text-emerald-500 text-sm outline-none"
-        />
-        <button onClick={addOp} className="bg-emerald-600 px-4 py-2 text-white text-xs font-bold hover:bg-emerald-500">
-          <Plus size={16} />
-        </button>
-      </div>
-
-      <div className="grid grid-cols-1 gap-2">
-        {operarios.map(op => (
-          <div key={op} className="flex justify-between p-2 bg-slate-950 border border-slate-800 text-sm">
-            <span className="text-slate-300 font-mono">{op}</span>
-            <button onClick={() => removeOp(op)} className="text-slate-600 hover:text-red-500">
-              <Trash2 size={14} />
-            </button>
-          </div>
-        ))}
-        {operarios.length === 0 && <p className="text-center text-slate-600 text-[10px]">NO OPERATORS IN CLOUD</p>}
-      </div>
-    </div>
-  );
-};
+          className="flex-1 bg-slate-950 border border-slate-700 p-2 text-emerald-500 text-sm outline-none
