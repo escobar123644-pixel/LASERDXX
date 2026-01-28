@@ -1,10 +1,8 @@
 // src/utils/auth.ts
 
-// Claves Maestras del Sistema
 export const MASTER_KEY = 'master_admin_2026';
 export const DEFAULT_OPERATOR_KEY = 'laseruserbeta';
-
-// Keys para LocalStorage (Sesión local y caché)
+export const OPERATOR_KEYS_STORAGE_KEY = 'dxf_pro_operators';
 export const SESSION_STORAGE_KEY = 'dxf_pro_session';
 export const HISTORY_STORAGE_KEY = 'dxf_pro_history';
 export const SETTINGS_STORAGE_KEY = 'dxf_pro_settings';
@@ -29,19 +27,38 @@ export interface AppSettings {
   showMetricsToOperator: boolean;
 }
 
-/**
- * Nueva función de autenticación:
- * Ahora recibe el NOMBRE (username) seleccionado de Upstash y la LLAVE (key)
- */
-export const authenticate = (username: string, key: string): UserSession | null => {
-  // 1. Validar si es Admin
+// Initialize default operator keys if not present
+const initOperatorKeys = () => {
+  const keys = localStorage.getItem(OPERATOR_KEYS_STORAGE_KEY);
+  if (!keys) {
+    localStorage.setItem(OPERATOR_KEYS_STORAGE_KEY, JSON.stringify([DEFAULT_OPERATOR_KEY]));
+  }
+};
+
+export const getOperatorKeys = (): string[] => {
+  initOperatorKeys();
+  const keys = localStorage.getItem(OPERATOR_KEYS_STORAGE_KEY);
+  return keys ? JSON.parse(keys) : [];
+};
+
+export const addOperatorKey = (key: string) => {
+  const keys = getOperatorKeys();
+  if (!keys.includes(key)) {
+    keys.push(key);
+    localStorage.setItem(OPERATOR_KEYS_STORAGE_KEY, JSON.stringify(keys));
+  }
+};
+
+export const authenticate = (key: string): UserSession | null => {
+  initOperatorKeys();
+  
   if (key === MASTER_KEY) {
-    return createSession('ADMIN', username || 'Master Admin');
+    return createSession('ADMIN', 'Master Admin');
   }
 
-  // 2. Validar si es Operador (usando la clave genérica)
-  if (key === DEFAULT_OPERATOR_KEY) {
-    return createSession('OPERATOR', username || 'Operator');
+  const operatorKeys = getOperatorKeys();
+  if (operatorKeys.includes(key)) {
+    return createSession('OPERATOR', 'Operator'); // In a real app we might want unique IDs
   }
 
   return null;
@@ -51,16 +68,11 @@ const createSession = (role: 'ADMIN' | 'OPERATOR', username: string): UserSessio
   const session: UserSession = {
     role,
     token: Math.random().toString(36).substring(2) + Date.now().toString(36),
-    expiry: Date.now() + 24 * 60 * 60 * 1000, // 24 horas de duración
-    username: username.toUpperCase()
+    expiry: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
+    username
   };
   localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
   return session;
-};
-
-// Función de ayuda para el componente Login
-export const login = (username: string, key: string): boolean => {
-  return authenticate(username, key) !== null;
 };
 
 export const getSession = (): UserSession | null => {
@@ -85,7 +97,18 @@ export const logout = () => {
 };
 
 export const globalReset = () => {
-  localStorage.clear();
+  localStorage.removeItem(SESSION_STORAGE_KEY);
+  // localStorage.removeItem(OPERATOR_KEYS_STORAGE_KEY); // Spec says "invalidate all sessions", removing keys might be too aggressive, but removing session is key.
+  // Actually "Global Reset" usually implies resetting everything or logging everyone out.
+  // The spec says: "Button to immediately invalidate all sessions and force logout".
+  // Since we use local storage, we can't easily invalidate *other* browser sessions without a backend.
+  // But we can simulate it by adding a "session version" or "valid since" timestamp in a real backend.
+  // For this client-side only app, we will just clear the current session.
+  // However, to truly "invalidate all sessions" in a client-side only app is impossible across devices.
+  // We will assume this is a terminal running on a specific machine.
+  localStorage.clear(); 
+  // Re-init defaults
+  initOperatorKeys();
 };
 
 export const logExport = (filename: string, consumptionYards: number, consumptionYardsX?: number) => {
@@ -101,8 +124,8 @@ export const logExport = (filename: string, consumptionYards: number, consumptio
   
   const historyStr = localStorage.getItem(HISTORY_STORAGE_KEY);
   const history: ExportRecord[] = historyStr ? JSON.parse(historyStr) : [];
-  history.unshift(record);
-  localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history.slice(0, 50))); // Guardar últimos 50
+  history.unshift(record); // Add to beginning
+  localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history));
 };
 
 export const getHistory = (): ExportRecord[] => {
