@@ -10,8 +10,8 @@ export interface Point {
 export interface Polyline {
   points: Point[];
   closed: boolean;
-  layer?: string; // 'CUT' or 'BOARDS'
-  id: string; // Unique ID for selection
+  layer?: string; 
+  id: string; 
   originalLayer?: string;
 }
 
@@ -29,8 +29,9 @@ export interface ProcessedResult {
 
 // --- Constants ---
 
-const HEAL_TOLERANCE = 0.05; // mm
-const MIN_ENTITY_LENGTH = 3.0; // mm
+const HEAL_TOLERANCE = 0.05; 
+const MIN_ENTITY_LENGTH = 3.0; // Estándar para archivos normales
+const GERBER_MIN_LENGTH = 0.5; // REGLA DE ORO: Tolerancia mínima para Gerber
 const YARDS_DIVISOR = 36.0;
 
 // --- Helper Functions ---
@@ -38,9 +39,8 @@ const YARDS_DIVISOR = 36.0;
 const distance = (p1: Point, p2: Point) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
 
 const isCollinear = (p1: Point, p2: Point, p3: Point) => {
-  // Area of triangle is 0
   const area = p1.x * (p2.y - p3.y) + p2.x * (p3.y - p1.y) + p3.x * (p1.y - p2.y);
-  return Math.abs(area) < 1e-6; // Epsilon
+  return Math.abs(area) < 1e-6; 
 };
 
 const getPolylineLength = (points: Point[], closed: boolean): number => {
@@ -56,13 +56,14 @@ const getPolylineLength = (points: Point[], closed: boolean): number => {
 
 // --- Core Logic ---
 
-// 1. Convert DXF Parser output to simplified Polylines
 const extractPolylines = (dxf: any): Polyline[] => {
   const polylines: Polyline[] = [];
-  
   if (!dxf || !dxf.entities) return [];
 
   dxf.entities.forEach((entity: any) => {
+    // REGLA 1: Eliminar capa de texto basura de Gerber
+    if (entity.layer === 'ABC') return;
+
     let points: Point[] = [];
     let closed = false;
 
@@ -76,14 +77,12 @@ const extractPolylines = (dxf: any): Polyline[] => {
       closed = entity.shape === true || (entity.vertices.length > 2 && 
         distance(points[0], points[points.length - 1]) < 0.001);
       
-      // Ensure closed polylines have start/end matching
       if (closed && points.length > 0) {
          if (distance(points[0], points[points.length - 1]) > 0.001) {
              points.push({ ...points[0] });
          }
       }
     } else if (entity.type === 'CIRCLE') {
-      // Approximate circle with segments
       const segments = 64;
       for (let i = 0; i < segments; i++) {
         const theta = (i / segments) * 2 * Math.PI;
@@ -94,14 +93,10 @@ const extractPolylines = (dxf: any): Polyline[] => {
       }
       closed = true;
     } else if (entity.type === 'ARC') {
-        // Approximate arc
         const startAngle = entity.startAngle;
         let endAngle = entity.endAngle;
         if (endAngle < startAngle) endAngle += 2 * Math.PI;
-        
-        // Determine number of segments based on size/angle, but fixed for now
         const segments = Math.max(12, Math.floor(Math.abs(endAngle - startAngle) * 8)); 
-        
         for (let i = 0; i <= segments; i++) {
             const theta = startAngle + ((endAngle - startAngle) * i) / segments;
             points.push({
@@ -124,126 +119,94 @@ const extractPolylines = (dxf: any): Polyline[] => {
   return polylines;
 };
 
-// 2. Zero-Gap Healing
 const healPolylines = (input: Polyline[]): Polyline[] => {
   let polylines = [...input];
   let changed = true;
-
   while (changed) {
     changed = false;
     const nextPolylines: Polyline[] = [];
     const used = new Set<number>();
-
     for (let i = 0; i < polylines.length; i++) {
       if (used.has(i)) continue;
-      
       let current = polylines[i];
       used.add(i);
-      
       if (current.closed) {
         nextPolylines.push(current);
         continue;
       }
-
       let merged = true;
       while (merged) {
         merged = false;
-        // Try to find a match for current start or end
         const start = current.points[0];
         const end = current.points[current.points.length - 1];
-
         for (let j = 0; j < polylines.length; j++) {
           if (used.has(j)) continue;
-          
           const target = polylines[j];
           if (target.closed) continue;
-
           const tStart = target.points[0];
           const tEnd = target.points[target.points.length - 1];
-
-          // Check End -> Start (Normal append)
           if (distance(end, tStart) <= HEAL_TOLERANCE) {
             current.points = [...current.points, ...target.points.slice(1)];
-            used.add(j);
-            merged = true;
-            break;
+            used.add(j); merged = true; break;
           }
-          // Check End -> End (Reverse target)
           if (distance(end, tEnd) <= HEAL_TOLERANCE) {
             current.points = [...current.points, ...target.points.reverse().slice(1)];
-            used.add(j);
-            merged = true;
-            break;
+            used.add(j); merged = true; break;
           }
-          // Check Start -> End (Prepend target)
           if (distance(start, tEnd) <= HEAL_TOLERANCE) {
             current.points = [...target.points, ...current.points.slice(1)];
-            used.add(j);
-            merged = true;
-            break;
+            used.add(j); merged = true; break;
           }
-          // Check Start -> Start (Reverse target and prepend)
           if (distance(start, tStart) <= HEAL_TOLERANCE) {
             current.points = [...target.points.reverse(), ...current.points.slice(1)];
-            used.add(j);
-            merged = true;
-            break;
+            used.add(j); merged = true; break;
           }
         }
-        
-        // Update closed status if ends meet
         if (distance(current.points[0], current.points[current.points.length - 1]) <= HEAL_TOLERANCE) {
             current.closed = true;
-            // Ensure exact closure
             current.points[current.points.length - 1] = { ...current.points[0] }; 
         }
       }
       nextPolylines.push(current);
     }
-    
-    if (nextPolylines.length < polylines.length) {
-      changed = true;
-    }
+    if (nextPolylines.length < polylines.length) changed = true;
     polylines = nextPolylines;
   }
-  
   return polylines;
 };
 
-// 3. Collinear Knot Removal
 const removeCollinearKnots = (polylines: Polyline[]): Polyline[] => {
   return polylines.map(poly => {
     if (poly.points.length < 3) return poly;
-    
     const newPoints = [poly.points[0]];
     for (let i = 1; i < poly.points.length - 1; i++) {
-      const p1 = poly.points[i - 1];
-      const p2 = poly.points[i];
-      const p3 = poly.points[i + 1];
-      
-      if (!isCollinear(p1, p2, p3)) {
-        newPoints.push(p2);
+      if (!isCollinear(poly.points[i - 1], poly.points[i], poly.points[i + 1])) {
+        newPoints.push(poly.points[i]);
       }
     }
     newPoints.push(poly.points[poly.points.length - 1]);
-    
     return { ...poly, points: newPoints };
   });
 };
 
-// 4. Debris Filtering
-const filterDebris = (polylines: Polyline[]): Polyline[] => {
-  return polylines.filter(poly => getPolylineLength(poly.points, poly.closed) >= MIN_ENTITY_LENGTH);
+// REGLA 2: El filtro inteligente
+const filterDebris = (polylines: Polyline[], isGerber: boolean): Polyline[] => {
+  return polylines.filter(poly => {
+    const length = getPolylineLength(poly.points, poly.closed);
+    
+    // Si es Gerber y la capa es T001L001, usamos la tolerancia diminuta (0.5mm)
+    // Esto salva las aberturas internas que antes se borraban.
+    const tolerance = (isGerber && poly.originalLayer === 'T001L001') ? GERBER_MIN_LENGTH : MIN_ENTITY_LENGTH;
+    
+    return length >= tolerance;
+  });
 };
 
-// 5. Frame Detection & Intelligent Layering
 const getPolylineBounds = (points: Point[]) => {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   points.forEach(p => {
-    if (p.x < minX) minX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y > maxY) maxY = p.y;
+    if (p.x < minX) minX = p.x; if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y;
   });
   return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
 };
@@ -251,46 +214,30 @@ const getPolylineBounds = (points: Point[]) => {
 const detectFrame = (polylines: Polyline[]): string | null => {
   let maxArea = 0;
   let frameId: string | null = null;
-
   polylines.forEach(poly => {
     if (!poly.closed) return;
     const bounds = getPolylineBounds(poly.points);
     const area = bounds.width * bounds.height;
-
-    // Check if it's the largest so far
     if (area > maxArea) {
-      // Check dimensions (Standard ~58 inches or ~1473 mm)
-      // Allow a generous tolerance for "near" (e.g. > 50 inches or > 1200mm)
-      // And check aspect ratio or just strict width?
-      // Requirement: "Identifica la entidad más grande... Si tiene dimensiones cercanas al ancho estándar (ej. 58 pulgadas)"
-      
-      const isInchScale = bounds.width > 50 && bounds.width < 70; // 58" +/-
-      const isMmScale = bounds.width > 1270 && bounds.width < 1780; // 50-70 inches in mm
-
+      const isInchScale = bounds.width > 50 && bounds.width < 70;
+      const isMmScale = bounds.width > 1270 && bounds.width < 1780;
       if (isInchScale || isMmScale) {
         maxArea = area;
         frameId = poly.id;
       }
     }
   });
-
   return frameId;
 };
 
 const isPointInPolygon = (p: Point, polygon: Point[]) => {
   let wn = 0;
   for (let i = 0; i < polygon.length - 1; i++) {
-    const p1 = polygon[i];
-    const p2 = polygon[i + 1];
-    
+    const p1 = polygon[i]; const p2 = polygon[i + 1];
     if (p1.y <= p.y) {
-      if (p2.y > p.y && (p2.x - p1.x) * (p.y - p1.y) - (p2.y - p1.y) * (p.x - p1.x) > 0) {
-        wn++;
-      }
+      if (p2.y > p.y && (p2.x - p1.x) * (p.y - p1.y) - (p2.y - p1.y) * (p.x - p1.x) > 0) wn++;
     } else {
-      if (p2.y <= p.y && (p2.x - p1.x) * (p.y - p1.y) - (p2.y - p1.y) * (p.x - p1.x) < 0) {
-        wn--;
-      }
+      if (p2.y <= p.y && (p2.x - p1.x) * (p.y - p1.y) - (p2.y - p1.y) * (p.x - p1.x) < 0) wn--;
     }
   }
   return wn !== 0;
@@ -298,22 +245,14 @@ const isPointInPolygon = (p: Point, polygon: Point[]) => {
 
 const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[] => {
   return polylines.map((poly, i) => {
-    // If this is the detected frame, force it to BOARDS
-    if (frameId && poly.id === frameId) {
-      return { ...poly, layer: 'BOARDS' };
-    }
+    if (frameId && poly.id === frameId) return { ...poly, layer: 'BOARDS' };
 
-    if (!poly.closed) {
-      return { ...poly, layer: 'CUT' }; 
-    }
-    
     const testPoint = poly.points[0];
     let nestingLevel = 0;
     
     for (let j = 0; j < polylines.length; j++) {
       if (i === j) continue;
       if (!polylines[j].closed) continue;
-      // Do not count the frame as a container for nesting logic
       if (frameId && polylines[j].id === frameId) continue;
       
       if (isPointInPolygon(testPoint, polylines[j].points)) {
@@ -321,14 +260,21 @@ const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[]
       }
     }
     
-    // Level 0 (Outermost) -> Even -> CUT
-    // Level 1 (Hole) -> Odd -> BOARDS
-    return { ...poly, layer: nestingLevel % 2 !== 0 ? 'BOARDS' : 'CUT' };
+    // Si la línea está abierta (como tu corte central) pero está dentro de una pieza,
+    // o si es un contorno interno cerrado, va a BOARDS (Rojo)
+    const layer = nestingLevel % 2 !== 0 ? 'BOARDS' : 'CUT';
+    
+    // Forzamos que si es una línea abierta interna, sea un corte interno
+    if (!poly.closed && layer === 'CUT' && nestingLevel > 0) return { ...poly, layer: 'BOARDS' };
+
+    return { ...poly, layer };
   });
 };
 
-// Main Process Function
 export const processDxf = (dxfString: string): ProcessedResult => {
+  // DETECCIÓN INTELIGENTE
+  const isGerber = dxfString.includes("Gerber Technology");
+
   const parser = new DxfParser();
   let dxf = null;
   try {
@@ -345,35 +291,26 @@ export const processDxf = (dxfString: string): ProcessedResult => {
   processed = removeCollinearKnots(processed);
   const healedCount = processed.length;
   
-  processed = filterDebris(processed);
+  // Aquí aplicamos el filtro con la bandera isGerber
+  processed = filterDebris(processed, isGerber);
   const debrisRemoved = healedCount - processed.length;
   
-  // Detect Frame
   const frameId = detectFrame(processed);
-
-  // Assign Layers (passing frameId to exclude it from nesting)
   processed = assignLayers(processed, frameId);
   
-  // Calculate Bounds (excluding the frame for consumption logic)
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   let hasContent = false;
 
   processed.forEach(p => {
-    // Skip frame in bounds calculation
     if (frameId && p.id === frameId) return;
-
     hasContent = true;
     p.points.forEach(v => {
-      if (v.x < minX) minX = v.x;
-      if (v.y < minY) minY = v.y;
-      if (v.x > maxX) maxX = v.x;
-      if (v.y > maxY) maxY = v.y;
+      if (v.x < minX) minX = v.x; if (v.y < minY) minY = v.y;
+      if (v.x > maxX) maxX = v.x; if (v.y > maxY) maxY = v.y;
     });
   });
 
-  if (!hasContent) {
-      minX = 0; minY = 0; maxX = 0; maxY = 0;
-  }
+  if (!hasContent) { minX = 0; minY = 0; maxX = 0; maxY = 0; }
 
   const materialHeightYards = (maxY - minY) / YARDS_DIVISOR;
   const materialWidthYards = (maxX - minX) / YARDS_DIVISOR;
@@ -391,9 +328,7 @@ export const processDxf = (dxfString: string): ProcessedResult => {
   };
 };
 
-// 6. R12 Native Export
 export const generateR12 = (polylines: Polyline[]): string => {
-  // Sort: BOARDS (Red) first, then CUT (Green)
   const sorted = [...polylines].sort((a, b) => {
     if (a.layer === 'BOARDS' && b.layer !== 'BOARDS') return -1;
     if (a.layer !== 'BOARDS' && b.layer === 'BOARDS') return 1;
@@ -404,30 +339,13 @@ export const generateR12 = (polylines: Polyline[]): string => {
 
   sorted.forEach(poly => {
     const layerName = poly.layer || 'CUT';
-    const color = layerName === 'BOARDS' ? 1 : 3; // Red=1, Green=3
-
-    output += `  0\nPOLYLINE\n`;
-    output += `  8\n${layerName}\n`; // Layer Name
-    output += ` 62\n${color}\n`;     // Color
-    output += ` 66\n1\n`;            // Vertices follow flag
-    
-    // Flags: 1 = closed (if closed)
-    if (poly.closed) {
-        output += ` 70\n1\n`; 
-    } else {
-        output += ` 70\n0\n`;
-    }
-    
-    output += ` 10\n0.0\n 20\n0.0\n 30\n0.0\n`; // Dummy start point
+    // Colores: Rojo (1) para BOARDS, Verde (3) para CUT
+    const color = layerName === 'BOARDS' ? 1 : 3; 
+    output += `  0\nPOLYLINE\n  8\n${layerName}\n 62\n${color}\n 66\n1\n 70\n${poly.closed ? 1 : 0}\n 10\n0.0\n 20\n0.0\n 30\n0.0\n`;
 
     poly.points.forEach(p => {
-      output += `  0\nVERTEX\n`;
-      output += `  8\n${layerName}\n`;
-      output += ` 10\n${p.x.toFixed(6)}\n`;
-      output += ` 20\n${p.y.toFixed(6)}\n`;
-      output += ` 30\n0.0\n`; // Z is 0
+      output += `  0\nVERTEX\n  8\n${layerName}\n 10\n${p.x.toFixed(6)}\n 20\n${p.y.toFixed(6)}\n 30\n0.0\n`;
     });
-
     output += `  0\nSEQEND\n`;
   });
 
