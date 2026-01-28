@@ -1,143 +1,100 @@
-// src/utils/auth.ts
-
-export const MASTER_KEY = 'master_admin_2026';
-export const DEFAULT_OPERATOR_KEY = 'laseruserbeta';
-export const OPERATOR_KEYS_STORAGE_KEY = 'dxf_pro_operators';
-export const SESSION_STORAGE_KEY = 'dxf_pro_session';
-export const HISTORY_STORAGE_KEY = 'dxf_pro_history';
-export const SETTINGS_STORAGE_KEY = 'dxf_pro_settings';
+// Tipos
+export type Role = 'ADMIN' | 'OPERATOR';
 
 export interface UserSession {
-  role: 'ADMIN' | 'OPERATOR';
-  token: string;
-  expiry: number;
   username: string;
-}
-
-export interface ExportRecord {
-  id: string;
-  timestamp: number;
-  operator: string;
-  filename: string;
-  consumptionYards: number;
-  consumptionYardsX?: number;
+  role: Role;
 }
 
 export interface AppSettings {
   showMetricsToOperator: boolean;
 }
 
-// Initialize default operator keys if not present
-const initOperatorKeys = () => {
-  const keys = localStorage.getItem(OPERATOR_KEYS_STORAGE_KEY);
-  if (!keys) {
-    localStorage.setItem(OPERATOR_KEYS_STORAGE_KEY, JSON.stringify([DEFAULT_OPERATOR_KEY]));
+// Datos por defecto (Usuario: admin / Clave: 123)
+const DEFAULT_USERS = [
+  { username: 'admin', password: '123', role: 'ADMIN' },
+  { username: 'operator', password: '123', role: 'OPERATOR' }
+];
+
+const DEFAULT_SETTINGS: AppSettings = {
+  showMetricsToOperator: false
+};
+
+const USERS_KEY = 'dxf_pro_users';
+const SETTINGS_KEY = 'dxf_pro_settings';
+const SESSION_KEY = 'dxf_pro_session';
+
+// Inicializar almacenamiento si está vacío
+const initStore = () => {
+  if (typeof window === 'undefined') return; // Seguridad para SSR
+  if (!localStorage.getItem(USERS_KEY)) {
+    localStorage.setItem(USERS_KEY, JSON.stringify(DEFAULT_USERS));
+  }
+  if (!localStorage.getItem(SETTINGS_KEY)) {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(DEFAULT_SETTINGS));
   }
 };
 
-export const getOperatorKeys = (): string[] => {
-  initOperatorKeys();
-  const keys = localStorage.getItem(OPERATOR_KEYS_STORAGE_KEY);
-  return keys ? JSON.parse(keys) : [];
-};
+// --- Funciones de Sesión (Login/Logout) ---
 
-export const addOperatorKey = (key: string) => {
-  const keys = getOperatorKeys();
-  if (!keys.includes(key)) {
-    keys.push(key);
-    localStorage.setItem(OPERATOR_KEYS_STORAGE_KEY, JSON.stringify(keys));
-  }
-};
-
-export const authenticate = (key: string): UserSession | null => {
-  initOperatorKeys();
+export const login = (username: string, pass: string): boolean => {
+  initStore();
+  const users = JSON.parse(localStorage.getItem(USERS_KEY) || '[]');
+  const user = users.find((u: any) => u.username === username && u.password === pass);
   
-  if (key === MASTER_KEY) {
-    return createSession('ADMIN', 'Master Admin');
+  if (user) {
+    const session: UserSession = { username: user.username, role: user.role };
+    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    return true;
   }
-
-  const operatorKeys = getOperatorKeys();
-  if (operatorKeys.includes(key)) {
-    return createSession('OPERATOR', 'Operator'); // In a real app we might want unique IDs
-  }
-
-  return null;
-};
-
-const createSession = (role: 'ADMIN' | 'OPERATOR', username: string): UserSession => {
-  const session: UserSession = {
-    role,
-    token: Math.random().toString(36).substring(2) + Date.now().toString(36),
-    expiry: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
-    username
-  };
-  localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
-  return session;
-};
-
-export const getSession = (): UserSession | null => {
-  const sessionStr = localStorage.getItem(SESSION_STORAGE_KEY);
-  if (!sessionStr) return null;
-
-  try {
-    const session: UserSession = JSON.parse(sessionStr);
-    if (Date.now() > session.expiry) {
-      logout();
-      return null;
-    }
-    return session;
-  } catch (e) {
-    logout();
-    return null;
-  }
+  return false;
 };
 
 export const logout = () => {
-  localStorage.removeItem(SESSION_STORAGE_KEY);
+  localStorage.removeItem(SESSION_KEY);
 };
 
-export const globalReset = () => {
-  localStorage.removeItem(SESSION_STORAGE_KEY);
-  // localStorage.removeItem(OPERATOR_KEYS_STORAGE_KEY); // Spec says "invalidate all sessions", removing keys might be too aggressive, but removing session is key.
-  // Actually "Global Reset" usually implies resetting everything or logging everyone out.
-  // The spec says: "Button to immediately invalidate all sessions and force logout".
-  // Since we use local storage, we can't easily invalidate *other* browser sessions without a backend.
-  // But we can simulate it by adding a "session version" or "valid since" timestamp in a real backend.
-  // For this client-side only app, we will just clear the current session.
-  // However, to truly "invalidate all sessions" in a client-side only app is impossible across devices.
-  // We will assume this is a terminal running on a specific machine.
-  localStorage.clear(); 
-  // Re-init defaults
-  initOperatorKeys();
+export const getSession = (): UserSession | null => {
+  if (typeof window === 'undefined') return null;
+  const sess = localStorage.getItem(SESSION_KEY);
+  return sess ? JSON.parse(sess) : null;
 };
 
-export const logExport = (filename: string, consumptionYards: number, consumptionYardsX?: number) => {
-  const session = getSession();
-  const record: ExportRecord = {
-    id: Math.random().toString(36).substring(2),
-    timestamp: Date.now(),
-    operator: session ? session.username : 'Unknown',
-    filename,
-    consumptionYards,
-    consumptionYardsX
-  };
-  
-  const historyStr = localStorage.getItem(HISTORY_STORAGE_KEY);
-  const history: ExportRecord[] = historyStr ? JSON.parse(historyStr) : [];
-  history.unshift(record); // Add to beginning
-  localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history));
+// --- Funciones de Administración (Faltaban estas) ---
+
+export const getUsers = () => {
+  initStore();
+  return JSON.parse(localStorage.getItem(USERS_KEY) || '[]');
 };
 
-export const getHistory = (): ExportRecord[] => {
-  const historyStr = localStorage.getItem(HISTORY_STORAGE_KEY);
-  return historyStr ? JSON.parse(historyStr) : [];
+export const addUser = (username: string) => {
+  const users = getUsers();
+  // Contraseña por defecto '123' para nuevos operadores
+  if (!users.find((u: any) => u.username === username)) {
+    users.push({ username, password: '123', role: 'OPERATOR' });
+    localStorage.setItem(USERS_KEY, JSON.stringify(users));
+  }
+};
+
+export const removeUser = (username: string) => {
+  let users = getUsers();
+  // No permitir borrar al admin principal
+  if (username === 'admin') return;
+  users = users.filter((u: any) => u.username !== username);
+  localStorage.setItem(USERS_KEY, JSON.stringify(users));
 };
 
 export const getSettings = (): AppSettings => {
-  const settingsStr = localStorage.getItem(SETTINGS_STORAGE_KEY);
-  return settingsStr ? JSON.parse(settingsStr) : { showMetricsToOperator: false };
+  initStore();
+  return JSON.parse(localStorage.getItem(SETTINGS_KEY) || JSON.stringify(DEFAULT_SETTINGS));
 };
 
-export const updateSettings = (settings: AppSettings) => {
-  localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+export const updateSettings = (newSettings: AppSettings) => {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(newSettings));
+};
+
+// --- Logs ---
+export const logExport = (filename: string, height: number, width: number) => {
+  console.log(`[EXPORT] ${new Date().toISOString()} - File: ${filename}, Consumption: ${height}yd x ${width}yd`);
+  // Aquí podrías guardar un historial en localStorage si quisieras
 };
