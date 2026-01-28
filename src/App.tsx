@@ -58,7 +58,7 @@ function App() {
         setLabels(result.labels || []); 
         setStats(result.stats);
       } catch (err) {
-        alert('Error processing DXF file. Ensure it is a valid text DXF.');
+        alert('Error processing DXF file.');
         console.error(err);
       }
     };
