@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Upload, Download, Settings, LogOut, FileCode, Shield, Layers, Scissors, Trash2 } from 'lucide-react';
 import { Login } from './components/Login';
 import { Viewer } from './components/Viewer';
-import { AdminPanel } from './components/AdminPanel';
+// CORRECCIÓN 1: Importar desde el archivo correcto
+import { AdminPanel } from './components/AdminPanelNew'; 
 import { getSession, logout, UserSession, logExport, getSettings } from './utils/auth';
 import { processDxf, generateR12, Polyline, ProcessedResult } from './utils/dxfUtils';
 
@@ -10,6 +11,8 @@ function App() {
   const [session, setSession] = useState<UserSession | null>(null);
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [polylines, setPolylines] = useState<Polyline[]>([]);
+  // CORRECCIÓN 2: Estado para guardar las etiquetas de tallas
+  const [labels, setLabels] = useState<any[]>([]); 
   const [stats, setStats] = useState<ProcessedResult['stats'] | null>(null);
   const [filename, setFilename] = useState<string>('');
   const [showMetrics, setShowMetrics] = useState(false);
@@ -36,6 +39,7 @@ function App() {
     logout();
     setSession(null);
     setPolylines([]);
+    setLabels([]); // Limpiar etiquetas al salir
     setStats(null);
     setFilename('');
   };
@@ -52,6 +56,8 @@ function App() {
       try {
         const result = processDxf(text);
         setPolylines(result.polylines);
+        // CORRECCIÓN 3: Guardar las etiquetas que extrajo dxfUtils
+        setLabels(result.labels || []); 
         setStats(result.stats);
       } catch (err) {
         alert('Error processing DXF file. Ensure it is a valid text DXF.');
@@ -59,14 +65,15 @@ function App() {
       }
     };
     reader.readAsText(file);
-    // Reset input
     e.target.value = '';
   };
 
   const handleExport = () => {
     if (polylines.length === 0) return;
     
-    const output = generateR12(polylines);
+    // CORRECCIÓN 4: Pasar las etiquetas al generador para que salgan en el archivo final
+    const output = generateR12(polylines, labels);
+    
     const blob = new Blob([output], { type: 'application/dxf' });
     const url = URL.createObjectURL(blob);
     
@@ -77,7 +84,6 @@ function App() {
     link.click();
     document.body.removeChild(link);
     
-    // Log Export
     if (stats) {
       logExport(filename, stats.materialHeightYards, stats.materialWidthYards);
     }
@@ -158,7 +164,6 @@ function App() {
 
       {/* Main Content */}
       <div className="flex-1 flex overflow-hidden relative">
-        {/* Sidebar / Info Panel */}
         <aside className="w-80 bg-slate-900 border-r border-slate-800 flex flex-col z-20 shadow-xl">
           <div className="p-6 border-b border-slate-800">
             <h2 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">File Statistics</h2>
