@@ -30,8 +30,8 @@ export interface ProcessedResult {
 // --- Constants ---
 
 const HEAL_TOLERANCE = 0.05; 
-const MIN_ENTITY_LENGTH = 3.0; // Estándar para archivos normales
-const GERBER_MIN_LENGTH = 0.5; // Mucho más pequeño para no borrar piquetes/aberturas
+const MIN_ENTITY_LENGTH = 3.0; // Standard
+const GERBER_MIN_LENGTH = 0.5; // Gerber special
 const YARDS_DIVISOR = 36.0;
 
 // --- Helper Functions ---
@@ -61,7 +61,7 @@ const extractPolylines = (dxf: any): Polyline[] => {
   if (!dxf || !dxf.entities) return [];
 
   dxf.entities.forEach((entity: any) => {
-    // REGLA GERBER: Ignorar capa ABC (Texto informativo que ensucia el láser)
+    // Gerber Rule: Ignore ABC layer
     if (entity.layer === 'ABC') return;
 
     let points: Point[] = [];
@@ -189,11 +189,9 @@ const removeCollinearKnots = (polylines: Polyline[]): Polyline[] => {
   });
 };
 
-// MODIFICADO: Filtro de basura inteligente para Gerber
 const filterDebris = (polylines: Polyline[], isGerber: boolean): Polyline[] => {
   return polylines.filter(poly => {
     const length = getPolylineLength(poly.points, poly.closed);
-    // Si es Gerber y es de la capa de corte, bajamos la tolerancia para no borrar aberturas
     const tolerance = (isGerber && poly.originalLayer === 'T001L001') ? GERBER_MIN_LENGTH : MIN_ENTITY_LENGTH;
     return length >= tolerance;
   });
@@ -244,8 +242,6 @@ const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[]
   return polylines.map((poly, i) => {
     if (frameId && poly.id === frameId) return { ...poly, layer: 'BOARDS' };
 
-    // Si una línea no está cerrada (como tu línea del centro), 
-    // verificamos si está dentro de otra polilínea cerrada
     const testPoint = poly.points[0];
     let nestingLevel = 0;
     
@@ -259,13 +255,11 @@ const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[]
       }
     }
     
-    // Si nestingLevel > 0, es un corte interno (BOARDS)
     return { ...poly, layer: nestingLevel % 2 !== 0 ? 'BOARDS' : 'CUT' };
   });
 };
 
 export const processDxf = (dxfString: string): ProcessedResult => {
-  // DETECCIÓN ESPECIAL DE GERBER
   const isGerber = dxfString.includes("Gerber Technology");
 
   const parser = new DxfParser();
@@ -284,7 +278,6 @@ export const processDxf = (dxfString: string): ProcessedResult => {
   processed = removeCollinearKnots(processed);
   const healedCount = processed.length;
   
-  // Pasamos el flag isGerber al filtro
   processed = filterDebris(processed, isGerber);
   const debrisRemoved = healedCount - processed.length;
   
