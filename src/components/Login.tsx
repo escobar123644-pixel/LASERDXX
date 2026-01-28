@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { authenticate } from '../utils/auth';
+import { login } from '../utils/auth'; // Cambiamos 'authenticate' por 'login'
 import { Terminal } from 'lucide-react';
 
 interface LoginProps {
@@ -7,100 +7,110 @@ interface LoginProps {
 }
 
 export const Login: React.FC<LoginProps> = ({ onLogin }) => {
-  const [key, setKey] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
-  const [bootSequence, setBootSequence] = useState<string[]>([]);
-  const [showInput, setShowInput] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Efecto de tipeo para el título
+  const [typedTitle, setTypedTitle] = useState('');
+  const fullTitle = 'DXF PRO // TERMINAL ACCESS';
 
   useEffect(() => {
-    // Simulate boot sequence
-    const lines = [
-      'INITIALIZING DXF PRO CORE...',
-      'LOADING GEOMETRY ENGINE...',
-      'CHECKING SUMMA DRIVERS...',
-      'ESTABLISHING SECURE CONNECTION...',
-      'READY.'
-    ];
-    
-    let delay = 0;
-    lines.forEach((line, index) => {
-      delay += Math.random() * 500 + 200;
-      setTimeout(() => {
-        setBootSequence(prev => [...prev, line]);
-        if (index === lines.length - 1) {
-          setShowInput(true);
-        }
-      }, delay);
-    });
+    let i = 0;
+    const interval = setInterval(() => {
+      setTypedTitle(fullTitle.slice(0, i));
+      i++;
+      if (i > fullTitle.length) clearInterval(interval);
+    }, 50);
+    return () => clearInterval(interval);
   }, []);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const session = authenticate(key);
-    if (session) {
-      setError('');
-      onLogin();
-    } else {
-      setError('ACCESS DENIED: INVALID KEY');
-      setKey('');
-    }
+    setError('');
+    setIsLoading(true);
+
+    // Simular un pequeño retraso de red para efecto realista
+    setTimeout(() => {
+      if (login(username, password)) {
+        onLogin();
+      } else {
+        setError('ACCESS DENIED: Invalid credentials');
+        setIsLoading(false);
+      }
+    }, 600);
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 font-mono overflow-hidden relative">
-      {/* CRT Effects */}
-      <div className="absolute inset-0 pointer-events-none opacity-10 bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%),linear-gradient(90deg,rgba(255,0,0,0.06),rgba(0,255,0,0.02),rgba(0,0,255,0.06))] z-10 bg-[length:100%_4px,3px_100%]"></div>
-      <div className="absolute inset-0 pointer-events-none opacity-5 animate-pulse bg-green-500/10 z-0"></div>
+    <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 font-mono text-slate-300 relative overflow-hidden">
+      {/* Fondo con efecto de grilla */}
+      <div className="absolute inset-0 bg-[linear-gradient(to_right,#1e293b_1px,transparent_1px),linear-gradient(to_bottom,#1e293b_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_50%,#000_70%,transparent_100%)] opacity-20 pointer-events-none"></div>
 
-      <div className="max-w-md w-full bg-slate-900 border border-slate-700 shadow-[0_0_20px_rgba(16,185,129,0.2)] p-8 relative z-20 rounded-sm">
-        <div className="flex items-center gap-3 mb-6 text-emerald-500 border-b border-slate-800 pb-4">
-          <Terminal size={24} />
-          <h1 className="text-xl font-bold tracking-wider">DXF PRO // TERMINAL</h1>
+      <div className="w-full max-w-md bg-slate-900 border border-slate-700 shadow-2xl relative z-10">
+        {/* Header de la terminal */}
+        <div className="bg-slate-800 p-3 flex items-center justify-between border-b border-slate-700">
+          <div className="flex items-center gap-2">
+            <Terminal size={16} className="text-emerald-500" />
+            <span className="text-xs font-bold tracking-widest text-slate-400">SECURE LOGIN</span>
+          </div>
+          <div className="flex gap-1.5">
+            <div className="w-2.5 h-2.5 rounded-full bg-red-500/50"></div>
+            <div className="w-2.5 h-2.5 rounded-full bg-amber-500/50"></div>
+            <div className="w-2.5 h-2.5 rounded-full bg-emerald-500/50"></div>
+          </div>
         </div>
 
-        <div className="space-y-2 mb-8 h-32 overflow-y-auto text-xs md:text-sm text-slate-400">
-          {bootSequence.map((line, i) => (
-            <div key={i} className="flex">
-              <span className="mr-2 text-slate-600">[{new Date().toLocaleTimeString()}]</span>
-              <span className="text-emerald-500/80">{line}</span>
-            </div>
-          ))}
-          {showInput && <div className="animate-pulse text-emerald-500">_</div>}
-        </div>
+        <div className="p-8">
+          <div className="mb-8 text-center">
+            <h1 className="text-xl font-bold text-white mb-2 h-8">{typedTitle}<span className="animate-pulse text-emerald-500">_</span></h1>
+            <p className="text-xs text-slate-500 uppercase tracking-widest">Authorized Personnel Only</p>
+          </div>
 
-        {showInput && (
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label className="block text-xs uppercase tracking-widest text-slate-500 mb-2">
-                Enter Access Key
-              </label>
+          <form onSubmit={handleSubmit} className="space-y-6">
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-emerald-500 uppercase tracking-wider block">Operator ID</label>
               <input
-                type="password"
-                value={key}
-                onChange={(e) => setKey(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-700 text-emerald-500 p-3 outline-none focus:border-emerald-500 focus:shadow-[0_0_10px_rgba(16,185,129,0.2)] transition-all font-mono text-lg"
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 p-3 text-slate-200 outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-all placeholder:text-slate-700"
+                placeholder="ENTER USERNAME..."
                 autoFocus
-                placeholder="••••••••••••••"
               />
             </div>
-            
+
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-emerald-500 uppercase tracking-wider block">Access Key</label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-700 p-3 text-slate-200 outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-all placeholder:text-slate-700"
+                placeholder="••••••••"
+              />
+            </div>
+
             {error && (
-              <div className="text-red-500 text-sm font-bold animate-pulse bg-red-900/10 p-2 border border-red-900/30">
-                {`>> ${error}`}
+              <div className="p-3 bg-red-500/10 border border-red-500/50 text-red-400 text-xs flex items-center gap-2 animate-pulse">
+                <span className="font-bold">ERROR:</span> {error}
               </div>
             )}
 
             <button
               type="submit"
-              className="w-full bg-emerald-900/30 border border-emerald-500/50 text-emerald-400 py-3 hover:bg-emerald-500 hover:text-slate-900 transition-all uppercase tracking-widest font-bold text-sm"
+              disabled={isLoading}
+              className={`w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 uppercase tracking-widest transition-all ${isLoading ? 'opacity-70 cursor-wait' : ''}`}
             >
-              Authenticate
+              {isLoading ? 'Authenticating...' : 'Initialize Session'}
             </button>
           </form>
-        )}
-        
-        <div className="mt-8 text-center">
-            <p className="text-[10px] text-slate-600 uppercase">System v2.0.4 | Secured by Summa Logic</p>
+
+          <div className="mt-6 text-center">
+             <p className="text-[10px] text-slate-600">
+               System Version 2.1.0 // Build 2024.05.20
+             </p>
+          </div>
         </div>
       </div>
     </div>
