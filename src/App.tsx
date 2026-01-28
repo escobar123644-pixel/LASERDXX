@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Upload, Download, Settings, LogOut, FileCode, Shield, Layers, Scissors, Trash2 } from 'lucide-react';
 import { Login } from './components/Login';
 import { Viewer } from './components/Viewer';
-import { AdminPanel } from './components/AdminPanel';
+// CORRECCIÓN AQUÍ: Agregamos 'New' al final de la ruta del archivo
+import { AdminPanel } from './components/AdminPanelNew'; 
 import { getSession, logout, UserSession, logExport, getSettings } from './utils/auth';
 import { processDxf, generateR12, Polyline, ProcessedResult } from './utils/dxfUtils';
 
