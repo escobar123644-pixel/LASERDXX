@@ -4,8 +4,7 @@ import DxfParser from 'dxf-parser';
 export interface Point { x: number; y: number; }
 export interface Polyline {
   points: Point[]; closed: boolean; layer?: string; id: string; originalLayer?: string;
-  area?: number; // Propiedad nueva para el algoritmo de árbol
-  bbox?: { minX: number; minY: number; maxX: number; maxY: number };
+  area?: number; bbox?: { minX: number; minY: number; maxX: number; maxY: number };
 }
 export interface TextEntity {
   x: number; y: number; text: string; layer: string; height: number;
@@ -20,21 +19,19 @@ export interface ProcessedResult {
   };
 }
 
-// Estructura de Árbol para la detección "Extraordinaria"
-interface TreeNode {
-    poly: Polyline;
-    children: TreeNode[];
+// --- Options Interface ---
+export interface ProcessOptions {
+    preserveFrame: boolean;
 }
 
 // --- Constants ---
 const HEAL_TOLERANCE = 0.05;
 const MIN_ENTITY_LENGTH = 3.0;
 const GERBER_MIN_LENGTH = 0.5;
-const TEXT_SIZE = 2.5;
+const TEXT_SIZE = 2.5; 
 const TEXT_OFFSET = 0.5;
 const YARDS_DIVISOR = 36.0;
 
-// Regex para tallas
 const SIZE_REGEX = /\b(XS|S|M|L|XL|2XL|3XL|YXS|YS|YM|YL|YXL|Y2XL|Y3XL|XSR|YSR|YMR|YLR|YXLR|Y2XLR)\b/i;
 
 // --- Helper Functions ---
@@ -52,15 +49,6 @@ const getPolylineLength = (points: Point[], closed: boolean): number => {
   return len;
 };
 
-// Nueva función de área precisa (del código que enviaste)
-const calculatePolygonArea = (points: Point[]): number => {
-    let area = 0;
-    for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
-        area += (points[j].x + points[i].x) * (points[j].y - points[i].y);
-    }
-    return Math.abs(area / 2);
-};
-
 const getPolylineBounds = (points: Point[]) => {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   points.forEach(p => {
@@ -70,29 +58,14 @@ const getPolylineBounds = (points: Point[]) => {
   return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
 };
 
-// Algoritmo robusto de Punto en Polígono (Ray Casting mejorado)
 const isPointInPolygon = (p: Point, polygon: Point[]) => {
-  let inside = false;
-  const x = p.x, y = p.y;
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-      const xi = polygon[i].x, yi = polygon[i].y;
-      const xj = polygon[j].x, yj = polygon[j].y;
-      const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-      if (intersect) inside = !inside;
+  let wn = 0;
+  for (let i = 0; i < polygon.length - 1; i++) {
+    const p1 = polygon[i]; const p2 = polygon[i + 1];
+    if (p1.y <= p.y) { if (p2.y > p.y && (p2.x - p1.x) * (p.y - p1.y) - (p2.y - p1.y) * (p.x - p1.x) > 0) wn++; } 
+    else { if (p2.y <= p.y && (p2.x - p1.x) * (p.y - p1.y) - (p2.y - p1.y) * (p.x - p1.x) < 0) wn--; }
   }
-  return inside;
-};
-
-// Verifica si una pieza está DENTRO de otra (Usando BBox + Muestreo)
-const isPolyInsidePoly = (inner: Polyline, outer: Polyline): boolean => {
-    // 1. Chequeo rápido de BBox (Cajas)
-    const bIn = inner.bbox!;
-    const bOut = outer.bbox!;
-    if (bIn.minX < bOut.minX || bIn.maxX > bOut.maxX || bIn.minY < bOut.minY || bIn.maxY > bOut.maxY) return false;
-    
-    // 2. Chequeo de puntos (Muestreo) - Si un punto del hijo está fuera del padre, no es hijo.
-    // Verificamos el primer punto
-    return isPointInPolygon(inner.points[0], outer.points);
+  return wn !== 0;
 };
 
 // --- Core Logic ---
@@ -207,93 +180,37 @@ const detectFrame = (polylines: Polyline[]): string | null => {
   return frameId;
 };
 
-// --- LOGICA EXTRAORDINARIA DE ARBOL (Sustituye a la anterior simple) ---
+// --- ASIGNACIÓN DE CAPAS BLINDADA ---
 const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[] => {
-    // 1. Preparar datos: Calcular áreas y BBoxes para optimizar
-    const enrichedPolylines = polylines.map(p => ({
-        ...p,
-        bbox: getPolylineBounds(p.points),
-        area: p.closed ? calculatePolygonArea(p.points) : 0
-    }));
+  return polylines.map((poly, i) => {
+    // 1. Marco siempre ROJO
+    if (frameId && poly.id === frameId) return { ...poly, layer: 'BOARDS' };
 
-    // Separar marco y abiertas
-    const frame = enrichedPolylines.find(p => p.id === frameId);
-    const openLines = enrichedPolylines.filter(p => !p.closed);
-    const closedLines = enrichedPolylines.filter(p => p.closed && p.id !== frameId);
-
-    // 2. Ordenar cerradas por Área Descendente (Mayor a menor) - CLAVE DEL ALGORITMO
-    closedLines.sort((a, b) => b.area! - a.area!);
-
-    // 3. Construir Árbol de Jerarquía
-    const roots: TreeNode[] = [];
-
-    const insertIntoTree = (node: TreeNode, siblings: TreeNode[]): boolean => {
-        for (const sibling of siblings) {
-            // Si cabe dentro de un "hermano", entonces es hijo de ese hermano
-            if (isPolyInsidePoly(node.poly, sibling.poly)) {
-                if (!insertIntoTree(node, sibling.children)) {
-                    sibling.children.push(node);
-                }
-                return true;
-            }
-        }
-        return false;
-    };
-
-    closedLines.forEach(poly => {
-        const node: TreeNode = { poly, children: [] };
-        // Intentar meter en los nodos raíz existentes
-        if (!insertIntoTree(node, roots)) {
-            roots.push(node);
-        }
-    });
-
-    // 4. Recorrer Árbol y Asignar Capas
-    const finalPolylines: Polyline[] = [];
-
-    // Si hay marco, él es Nivel 0 (BOARDS) -> Raíces son Nivel 1 (CUT)
-    // Si no hay marco, Raíces son Nivel 0 (CUT) -> Hijos Nivel 1 (BOARDS)
-    // Lógica ajustada para tu caso:
-    // Marco = BOARDS (Rojo)
-    // Pieza (Contorno) = CUT (Verde)
-    // Agujero en pieza = BOARDS (Rojo)
-    
-    const traverse = (node: TreeNode, depth: number) => {
-        // Determinamos capa basado en la profundidad
-        // Depth 0 (Raiz sin marco) = CUT
-        // Depth 1 (Hijo de raiz) = BOARDS
-        const layer = depth % 2 === 0 ? 'CUT' : 'BOARDS';
-        
-        finalPolylines.push({ ...node.poly, layer });
-        
-        node.children.forEach(child => traverse(child, depth + 1));
-    };
-
-    roots.forEach(root => traverse(root, 0));
-
-    // 5. Procesar Líneas Abiertas (Cortes internos, piquetes)
-    // Si una línea abierta está dentro de una pieza CUT, es un corte interno -> BOARDS
-    // Si está fuera de todo, es basura o corte externo -> CUT
-    openLines.forEach(line => {
-        // Verificar si está dentro de alguna pieza CUT
-        const parent = finalPolylines.find(p => p.layer === 'CUT' && p.closed && isPolyInsidePoly(line, p));
-        
-        if (parent) {
-            finalPolylines.push({ ...line, layer: 'BOARDS' }); // Corte interno
-        } else {
-            finalPolylines.push({ ...line, layer: 'CUT' }); // Corte externo suelto
-        }
-    });
-
-    // 6. Agregar Marco (si existe)
-    if (frame) {
-        finalPolylines.push({ ...frame, layer: 'BOARDS' });
+    // 2. Líneas abiertas (escombros/piquetes) SIEMPRE ROJAS
+    if (!poly.closed) {
+        return { ...poly, layer: 'BOARDS' };
     }
 
-    return finalPolylines;
+    // 3. Contornos cerrados: Lógica par/impar
+    const testPoint = poly.points[0];
+    let nestingLevel = 0;
+    
+    for (let j = 0; j < polylines.length; j++) {
+      if (i === j) continue;
+      if (!polylines[j].closed) continue;
+      if (frameId && polylines[j].id === frameId) continue;
+      
+      if (isPointInPolygon(testPoint, polylines[j].points)) {
+        nestingLevel++;
+      }
+    }
+    
+    const layer = nestingLevel % 2 !== 0 ? 'BOARDS' : 'CUT';
+    return { ...poly, layer };
+  });
 };
 
-// --- LOGICA DE ZONAS (Sin cambios, funciona bien) ---
+// --- ETIQUETADO ---
 const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number, text:string}[]): TextEntity[] => {
     const dividers: number[] = [];
     polylines.forEach(p => {
@@ -302,8 +219,6 @@ const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number
     });
     
     dividers.sort((a, b) => a - b);
-    
-    // Bounds globales usando min/max de todas las polilineas
     let globalMinX = Infinity, globalMaxX = -Infinity;
     polylines.forEach(p => {
         if (!p.bbox) p.bbox = getPolylineBounds(p.points);
@@ -320,7 +235,6 @@ const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number
         if ((endX - startX) < 2) continue;
 
         const textInZone = rawTexts.find(t => t.x >= startX && t.x <= endX);
-        
         if (textInZone) {
             const sizeLabel = textInZone.text;
             let largestPiece: Polyline | null = null;
@@ -335,10 +249,7 @@ const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number
             piecesInZone.forEach(p => {
                 const pb = p.bbox!;
                 const area = pb.width * pb.height;
-                if (area > maxArea) {
-                    maxArea = area;
-                    largestPiece = p;
-                }
+                if (area > maxArea) { maxArea = area; largestPiece = p; }
             });
 
             if (largestPiece) {
@@ -356,7 +267,8 @@ const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number
     return finalLabels;
 };
 
-export const processDxf = (dxfString: string): ProcessedResult => {
+// PROCESO PRINCIPAL
+export const processDxf = (dxfString: string, options = { preserveFrame: true }): ProcessedResult => {
   const isGerber = dxfString.includes("Gerber Technology");
   const parser = new DxfParser();
   let dxf;
@@ -372,9 +284,9 @@ export const processDxf = (dxfString: string): ProcessedResult => {
   processed = filterDebris(processed, isGerber);
   const debrisRemoved = healedCount - processed.length;
   
-  const frameId = detectFrame(processed);
+  // Opción Manual
+  const frameId = options.preserveFrame ? detectFrame(processed) : null;
   
-  // AQUI SE APLICA LA MAGIA DEL ÁRBOL
   processed = assignLayers(processed, frameId);
   
   let finalLabels: TextEntity[] = [];
@@ -387,7 +299,6 @@ export const processDxf = (dxfString: string): ProcessedResult => {
   processed.forEach(p => {
     if (frameId && p.id === frameId) return;
     hasContent = true;
-    // Recalcular bbox si es necesario o usar el existente
     const b = p.bbox || getPolylineBounds(p.points);
     minX = Math.min(minX, b.minX); minY = Math.min(minY, b.minY);
     maxX = Math.max(maxX, b.maxX); maxY = Math.max(maxY, b.maxY);
