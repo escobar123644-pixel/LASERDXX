@@ -1,7 +1,6 @@
 import DxfParser from 'dxf-parser';
 
 // --- Types ---
-
 export interface Point { x: number; y: number; }
 export interface Polyline {
   points: Point[]; closed: boolean; layer?: string; id: string; originalLayer?: string;
@@ -23,11 +22,11 @@ export interface ProcessedResult {
 const HEAL_TOLERANCE = 0.05;
 const MIN_ENTITY_LENGTH = 3.0;
 const GERBER_MIN_LENGTH = 0.5; // Para aberturas internas
-const TEXT_SIZE = 0.5; // Tamaño de la letra (ajustable según tus unidades)
-const TEXT_OFFSET = 0.2; // Distancia de separación hacia arriba
+const TEXT_SIZE = 0.5; // Tamaño de la letra
+const TEXT_OFFSET = 0.2; // Separación vertical
 const YARDS_DIVISOR = 36.0;
 
-// Regex para detectar tallas comunes
+// Regex para detectar tallas
 const SIZE_REGEX = /\b(XS|S|M|L|XL|2XL|3XL|4XL|YS|YM|YL|YXL|[\d]+T|[\d]+Y)\b/i;
 
 // --- Helper Functions ---
@@ -46,7 +45,6 @@ const getPolylineLength = (points: Point[], closed: boolean): number => {
 };
 
 // --- Core Logic ---
-
 const extractData = (dxf: any) => {
   const polylines: Polyline[] = [];
   const rawTexts: {x:number, y:number, text:string}[] = [];
@@ -54,7 +52,7 @@ const extractData = (dxf: any) => {
   if (!dxf || !dxf.entities) return { polylines, rawTexts };
 
   dxf.entities.forEach((entity: any) => {
-    // 1. Extraer Texto Potencial (Solo guardamos lo que parece una talla)
+    // 1. Extraer Texto de Talla
     if (entity.type === 'TEXT' || entity.type === 'MTEXT') {
         const content = (entity.text || '').trim();
         const match = content.match(SIZE_REGEX);
@@ -65,7 +63,7 @@ const extractData = (dxf: any) => {
                 text: match[0].toUpperCase()
             });
         }
-        return; // No procesar texto como línea
+        return; 
     }
 
     // 2. Extraer Geometría
@@ -196,26 +194,26 @@ const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[]
   });
 };
 
-// --- LOGICA DE ETIQUETADO INTELIGENTE ---
+// Generar etiquetas inteligentes
 const generateSmartLabels = (polylines: Polyline[], rawTexts: {x:number, y:number, text:string}[]): TextEntity[] => {
     const labels: TextEntity[] = [];
-    const pieces = polylines.filter(p => p.closed && p.layer === 'CUT'); // Solo piezas de corte
+    const pieces = polylines.filter(p => p.closed && p.layer === 'CUT'); 
 
     pieces.forEach(piece => {
-        // 1. Buscamos si esta pieza tenía texto original dentro
         const bounds = getPolylineBounds(piece.points);
+        // Buscar texto original que esté dentro de la pieza
         const internalText = rawTexts.find(t => isPointInPolygon({x: t.x, y: t.y}, piece.points));
 
         if (internalText) {
-            // 2. Calculamos la posición: CENTRO SUPERIOR
+            // Calcular centro superior
             const centerX = (bounds.minX + bounds.maxX) / 2;
-            const topY = bounds.maxY + TEXT_OFFSET; // Un poco más arriba del límite
+            const topY = bounds.maxY + TEXT_OFFSET; 
 
             labels.push({
                 x: centerX,
                 y: topY,
-                text: internalText.text, // Usamos la talla encontrada (S, M, L...)
-                layer: 'BOARDS',         // MISMA CAPA QUE INTERNOS (Rojo)
+                text: internalText.text, 
+                layer: 'BOARDS',         // Capa Roja
                 height: TEXT_SIZE
             });
         }
@@ -242,7 +240,7 @@ export const processDxf = (dxfString: string): ProcessedResult => {
   const frameId = detectFrame(processed);
   processed = assignLayers(processed, frameId);
   
-  // GENERAR ETIQUETAS SI ES GERBER
+  // GENERAR ETIQUETAS
   let finalLabels: TextEntity[] = [];
   if (isGerber && rawTexts.length > 0) {
       finalLabels = generateSmartLabels(processed, rawTexts);
@@ -281,28 +279,28 @@ export const generateR12 = (polylines: Polyline[], labels: TextEntity[] = []): s
 
   let output = `  0\nSECTION\n  2\nHEADER\n  0\nENDSEC\n  0\nSECTION\n  2\nTABLES\n  0\nENDSEC\n  0\nSECTION\n  2\nENTITIES\n`;
 
-  // GEOMETRÍA
+  // Geometría
   sorted.forEach(poly => {
     const layerName = poly.layer || 'CUT';
-    const color = layerName === 'BOARDS' ? 1 : 3; // Rojo=1, Verde=3
+    const color = layerName === 'BOARDS' ? 1 : 3; 
     output += `  0\nPOLYLINE\n  8\n${layerName}\n 62\n${color}\n 66\n1\n 70\n${poly.closed?1:0}\n 10\n0\n 20\n0\n 30\n0\n`;
     poly.points.forEach(p => output += `  0\nVERTEX\n  8\n${layerName}\n 10\n${p.x.toFixed(6)}\n 20\n${p.y.toFixed(6)}\n 30\n0\n`);
     output += `  0\nSEQEND\n`;
   });
 
-  // ETIQUETAS (Texto de Talla)
+  // Etiquetas
   if (labels && labels.length > 0) {
       labels.forEach(lbl => {
           output += `  0\nTEXT\n`;
-          output += `  8\nBOARDS\n`; // MISMA CAPA QUE LOS INTERNOS
-          output += ` 62\n1\n`;       // COLOR ROJO (1)
+          output += `  8\nBOARDS\n`; 
+          output += ` 62\n1\n`;       
           output += ` 10\n${lbl.x.toFixed(6)}\n`;
           output += ` 20\n${lbl.y.toFixed(6)}\n`;
           output += ` 30\n0.0\n`;
           output += ` 40\n${lbl.height.toFixed(6)}\n`;
           output += `  1\n${lbl.text}\n`;
-          output += ` 72\n1\n`; // Alineación Horizontal: Centro
-          output += ` 11\n${lbl.x.toFixed(6)}\n`; // Punto de alineación
+          output += ` 72\n1\n`; 
+          output += ` 11\n${lbl.x.toFixed(6)}\n`;
           output += ` 21\n${lbl.y.toFixed(6)}\n`; 
       });
   }
