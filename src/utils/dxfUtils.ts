@@ -4,6 +4,8 @@ import DxfParser from 'dxf-parser';
 export interface Point { x: number; y: number; }
 export interface Polyline {
   points: Point[]; closed: boolean; layer?: string; id: string; originalLayer?: string;
+  area?: number; // Propiedad nueva para el algoritmo de árbol
+  bbox?: { minX: number; minY: number; maxX: number; maxY: number };
 }
 export interface TextEntity {
   x: number; y: number; text: string; layer: string; height: number;
@@ -18,15 +20,21 @@ export interface ProcessedResult {
   };
 }
 
+// Estructura de Árbol para la detección "Extraordinaria"
+interface TreeNode {
+    poly: Polyline;
+    children: TreeNode[];
+}
+
 // --- Constants ---
 const HEAL_TOLERANCE = 0.05;
 const MIN_ENTITY_LENGTH = 3.0;
 const GERBER_MIN_LENGTH = 0.5;
-const TEXT_SIZE = 2.5; // Texto grande para que se vea
+const TEXT_SIZE = 2.5;
 const TEXT_OFFSET = 0.5;
 const YARDS_DIVISOR = 36.0;
 
-// REGEX EXACTO SEGÚN TU LISTA:
+// Regex para tallas
 const SIZE_REGEX = /\b(XS|S|M|L|XL|2XL|3XL|YXS|YS|YM|YL|YXL|Y2XL|Y3XL|XSR|YSR|YMR|YLR|YXLR|Y2XLR)\b/i;
 
 // --- Helper Functions ---
@@ -44,6 +52,15 @@ const getPolylineLength = (points: Point[], closed: boolean): number => {
   return len;
 };
 
+// Nueva función de área precisa (del código que enviaste)
+const calculatePolygonArea = (points: Point[]): number => {
+    let area = 0;
+    for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+        area += (points[j].x + points[i].x) * (points[j].y - points[i].y);
+    }
+    return Math.abs(area / 2);
+};
+
 const getPolylineBounds = (points: Point[]) => {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   points.forEach(p => {
@@ -53,14 +70,29 @@ const getPolylineBounds = (points: Point[]) => {
   return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
 };
 
+// Algoritmo robusto de Punto en Polígono (Ray Casting mejorado)
 const isPointInPolygon = (p: Point, polygon: Point[]) => {
-  let wn = 0;
-  for (let i = 0; i < polygon.length - 1; i++) {
-    const p1 = polygon[i]; const p2 = polygon[i + 1];
-    if (p1.y <= p.y) { if (p2.y > p.y && (p2.x - p1.x) * (p.y - p1.y) - (p2.y - p1.y) * (p.x - p1.x) > 0) wn++; } 
-    else { if (p2.y <= p.y && (p2.x - p1.x) * (p.y - p1.y) - (p2.y - p1.y) * (p.x - p1.x) < 0) wn--; }
+  let inside = false;
+  const x = p.x, y = p.y;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i].x, yi = polygon[i].y;
+      const xj = polygon[j].x, yj = polygon[j].y;
+      const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
   }
-  return wn !== 0;
+  return inside;
+};
+
+// Verifica si una pieza está DENTRO de otra (Usando BBox + Muestreo)
+const isPolyInsidePoly = (inner: Polyline, outer: Polyline): boolean => {
+    // 1. Chequeo rápido de BBox (Cajas)
+    const bIn = inner.bbox!;
+    const bOut = outer.bbox!;
+    if (bIn.minX < bOut.minX || bIn.maxX > bOut.maxX || bIn.minY < bOut.minY || bIn.maxY > bOut.maxY) return false;
+    
+    // 2. Chequeo de puntos (Muestreo) - Si un punto del hijo está fuera del padre, no es hijo.
+    // Verificamos el primer punto
+    return isPointInPolygon(inner.points[0], outer.points);
 };
 
 // --- Core Logic ---
@@ -72,18 +104,11 @@ const extractData = (dxf: any) => {
   if (!dxf || !dxf.entities) return { polylines, rawTexts };
 
   dxf.entities.forEach((entity: any) => {
-    // Escaneo de texto con el NUEVO REGEX
     if (entity.type === 'TEXT' || entity.type === 'MTEXT') {
         const content = (entity.text || '').trim();
         const match = content.match(SIZE_REGEX);
-        
         if (match) {
-            // Guardamos coordenada y la talla LIMPIA (ej: "YXL")
-            rawTexts.push({ 
-                x: entity.startPoint.x, 
-                y: entity.startPoint.y, 
-                text: match[0].toUpperCase() 
-            });
+            rawTexts.push({ x: entity.startPoint.x, y: entity.startPoint.y, text: match[0].toUpperCase() });
         }
         return; 
     }
@@ -182,76 +207,133 @@ const detectFrame = (polylines: Polyline[]): string | null => {
   return frameId;
 };
 
+// --- LOGICA EXTRAORDINARIA DE ARBOL (Sustituye a la anterior simple) ---
 const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[] => {
-  return polylines.map((poly, i) => {
-    if (frameId && poly.id === frameId) return { ...poly, layer: 'BOARDS' };
-    const testPoint = poly.points[0];
-    let nestingLevel = 0;
-    for (let j = 0; j < polylines.length; j++) {
-      if (i === j) continue;
-      if (!polylines[j].closed) continue;
-      if (frameId && polylines[j].id === frameId) continue;
-      if (isPointInPolygon(testPoint, polylines[j].points)) nestingLevel++;
+    // 1. Preparar datos: Calcular áreas y BBoxes para optimizar
+    const enrichedPolylines = polylines.map(p => ({
+        ...p,
+        bbox: getPolylineBounds(p.points),
+        area: p.closed ? calculatePolygonArea(p.points) : 0
+    }));
+
+    // Separar marco y abiertas
+    const frame = enrichedPolylines.find(p => p.id === frameId);
+    const openLines = enrichedPolylines.filter(p => !p.closed);
+    const closedLines = enrichedPolylines.filter(p => p.closed && p.id !== frameId);
+
+    // 2. Ordenar cerradas por Área Descendente (Mayor a menor) - CLAVE DEL ALGORITMO
+    closedLines.sort((a, b) => b.area! - a.area!);
+
+    // 3. Construir Árbol de Jerarquía
+    const roots: TreeNode[] = [];
+
+    const insertIntoTree = (node: TreeNode, siblings: TreeNode[]): boolean => {
+        for (const sibling of siblings) {
+            // Si cabe dentro de un "hermano", entonces es hijo de ese hermano
+            if (isPolyInsidePoly(node.poly, sibling.poly)) {
+                if (!insertIntoTree(node, sibling.children)) {
+                    sibling.children.push(node);
+                }
+                return true;
+            }
+        }
+        return false;
+    };
+
+    closedLines.forEach(poly => {
+        const node: TreeNode = { poly, children: [] };
+        // Intentar meter en los nodos raíz existentes
+        if (!insertIntoTree(node, roots)) {
+            roots.push(node);
+        }
+    });
+
+    // 4. Recorrer Árbol y Asignar Capas
+    const finalPolylines: Polyline[] = [];
+
+    // Si hay marco, él es Nivel 0 (BOARDS) -> Raíces son Nivel 1 (CUT)
+    // Si no hay marco, Raíces son Nivel 0 (CUT) -> Hijos Nivel 1 (BOARDS)
+    // Lógica ajustada para tu caso:
+    // Marco = BOARDS (Rojo)
+    // Pieza (Contorno) = CUT (Verde)
+    // Agujero en pieza = BOARDS (Rojo)
+    
+    const traverse = (node: TreeNode, depth: number) => {
+        // Determinamos capa basado en la profundidad
+        // Depth 0 (Raiz sin marco) = CUT
+        // Depth 1 (Hijo de raiz) = BOARDS
+        const layer = depth % 2 === 0 ? 'CUT' : 'BOARDS';
+        
+        finalPolylines.push({ ...node.poly, layer });
+        
+        node.children.forEach(child => traverse(child, depth + 1));
+    };
+
+    roots.forEach(root => traverse(root, 0));
+
+    // 5. Procesar Líneas Abiertas (Cortes internos, piquetes)
+    // Si una línea abierta está dentro de una pieza CUT, es un corte interno -> BOARDS
+    // Si está fuera de todo, es basura o corte externo -> CUT
+    openLines.forEach(line => {
+        // Verificar si está dentro de alguna pieza CUT
+        const parent = finalPolylines.find(p => p.layer === 'CUT' && p.closed && isPolyInsidePoly(line, p));
+        
+        if (parent) {
+            finalPolylines.push({ ...line, layer: 'BOARDS' }); // Corte interno
+        } else {
+            finalPolylines.push({ ...line, layer: 'CUT' }); // Corte externo suelto
+        }
+    });
+
+    // 6. Agregar Marco (si existe)
+    if (frame) {
+        finalPolylines.push({ ...frame, layer: 'BOARDS' });
     }
-    const layer = nestingLevel % 2 !== 0 ? 'BOARDS' : 'CUT';
-    if (!poly.closed && layer === 'CUT' && nestingLevel > 0) return { ...poly, layer: 'BOARDS' };
-    return { ...poly, layer };
-  });
+
+    return finalPolylines;
 };
 
-// --- ESTRATEGIA DE BLOQUES RESTAURADA ---
+// --- LOGICA DE ZONAS (Sin cambios, funciona bien) ---
 const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number, text:string}[]): TextEntity[] => {
-    // 1. Detectar Líneas Divisorias Verticales
     const dividers: number[] = [];
     polylines.forEach(p => {
         const bounds = getPolylineBounds(p.points);
-        // Línea vertical larga = Divisor de tallas en Gerber
-        if (bounds.height > 40 && bounds.width < 0.5) {
-            dividers.push(bounds.minX);
-        }
+        if (bounds.height > 40 && bounds.width < 0.5) dividers.push(bounds.minX);
     });
     
     dividers.sort((a, b) => a - b);
     
-    // Bounds globales para cerrar la primera y última zona
+    // Bounds globales usando min/max de todas las polilineas
     let globalMinX = Infinity, globalMaxX = -Infinity;
     polylines.forEach(p => {
-        const b = getPolylineBounds(p.points);
-        if (b.minX < globalMinX) globalMinX = b.minX;
-        if (b.maxX > globalMaxX) globalMaxX = b.maxX;
+        if (!p.bbox) p.bbox = getPolylineBounds(p.points);
+        if (p.bbox.minX < globalMinX) globalMinX = p.bbox.minX;
+        if (p.bbox.maxX > globalMaxX) globalMaxX = p.bbox.maxX;
     });
 
     const zones = [globalMinX, ...dividers, globalMaxX];
     const finalLabels: TextEntity[] = [];
 
-    // 2. Procesar cada Bloque
     for (let i = 0; i < zones.length - 1; i++) {
         const startX = zones[i];
         const endX = zones[i+1];
-        
-        // Ignorar zonas basura muy delgadas
-        if ((endX - startX) < 5) continue;
+        if ((endX - startX) < 2) continue;
 
-        // Buscar textos de tallas en este bloque
-        // Como dijiste: "En este bloque solo encontrarás M"
         const textInZone = rawTexts.find(t => t.x >= startX && t.x <= endX);
         
         if (textInZone) {
-            const sizeLabel = textInZone.text; // Esta es la talla única del bloque
-
-            // Buscar la pieza más grande del bloque para ponerle la etiqueta
+            const sizeLabel = textInZone.text;
             let largestPiece: Polyline | null = null;
             let maxArea = 0;
 
-            // Filtramos piezas que estén DENTRO de este bloque X
             const piecesInZone = polylines.filter(p => {
-                const pb = getPolylineBounds(p.points);
+                const pb = p.bbox!;
                 const centerX = (pb.minX + pb.maxX) / 2;
                 return p.closed && p.layer === 'CUT' && centerX >= startX && centerX <= endX;
             });
 
             piecesInZone.forEach(p => {
-                const pb = getPolylineBounds(p.points);
+                const pb = p.bbox!;
                 const area = pb.width * pb.height;
                 if (area > maxArea) {
                     maxArea = area;
@@ -259,12 +341,11 @@ const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number
                 }
             });
 
-            // Si hay pieza, ponemos la etiqueta ENCIMA
             if (largestPiece) {
-                const pb = getPolylineBounds(largestPiece.points);
+                const pb = largestPiece!.bbox!;
                 finalLabels.push({
-                    x: (pb.minX + pb.maxX) / 2, // Centro X
-                    y: pb.maxY + TEXT_OFFSET,   // Arriba de la pieza (para que se vea claro)
+                    x: (pb.minX + pb.maxX) / 2,
+                    y: pb.maxY + TEXT_OFFSET,   
                     text: sizeLabel,
                     layer: 'BOARDS',
                     height: TEXT_SIZE
@@ -272,7 +353,6 @@ const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number
             }
         }
     }
-
     return finalLabels;
 };
 
@@ -293,9 +373,10 @@ export const processDxf = (dxfString: string): ProcessedResult => {
   const debrisRemoved = healedCount - processed.length;
   
   const frameId = detectFrame(processed);
+  
+  // AQUI SE APLICA LA MAGIA DEL ÁRBOL
   processed = assignLayers(processed, frameId);
   
-  // ACTIVAMOS LA LÓGICA DE ZONAS
   let finalLabels: TextEntity[] = [];
   if (isGerber && rawTexts.length > 0) {
       finalLabels = groupLabelsByZones(processed, rawTexts);
@@ -306,10 +387,10 @@ export const processDxf = (dxfString: string): ProcessedResult => {
   processed.forEach(p => {
     if (frameId && p.id === frameId) return;
     hasContent = true;
-    p.points.forEach(v => {
-      minX = Math.min(minX, v.x); minY = Math.min(minY, v.y);
-      maxX = Math.max(maxX, v.x); maxY = Math.max(maxY, v.y);
-    });
+    // Recalcular bbox si es necesario o usar el existente
+    const b = p.bbox || getPolylineBounds(p.points);
+    minX = Math.min(minX, b.minX); minY = Math.min(minY, b.minY);
+    maxX = Math.max(maxX, b.maxX); maxY = Math.max(maxY, b.maxY);
   });
   if (!hasContent) { minX=0; minY=0; maxX=0; maxY=0; }
 
@@ -352,7 +433,7 @@ export const generateR12 = (polylines: Polyline[], labels: TextEntity[] = []): s
           output += ` 30\n0.0\n`;
           output += ` 40\n${lbl.height.toFixed(6)}\n`;
           output += `  1\n${lbl.text}\n`;
-          output += ` 72\n4\n`; // Middle Center
+          output += ` 72\n4\n`; 
           output += ` 11\n${lbl.x.toFixed(6)}\n`; 
           output += ` 21\n${lbl.y.toFixed(6)}\n`; 
       });
