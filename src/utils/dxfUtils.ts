@@ -22,11 +22,12 @@ export interface ProcessedResult {
 const HEAL_TOLERANCE = 0.05;
 const MIN_ENTITY_LENGTH = 3.0;
 const GERBER_MIN_LENGTH = 0.5;
+const TEXT_SIZE = 2.5; // Texto grande para que se vea
+const TEXT_OFFSET = 0.5;
 const YARDS_DIVISOR = 36.0;
 
-// REGEX RELAJADO: Busca la talla incluso si está pegada a otros caracteres
-// Detecta: "S", "M", "L", "XL", "2XL", "YS", "SIZE:S", "SZ-M"
-const SIZE_REGEX = /(XS|S|M|L|XL|2XL|3XL|4XL|YS|YM|YL|YXL|[\d]+T|[\d]+Y)/i;
+// REGEX EXACTO SEGÚN TU LISTA:
+const SIZE_REGEX = /\b(XS|S|M|L|XL|2XL|3XL|YXS|YS|YM|YL|YXL|Y2XL|Y3XL|XSR|YSR|YMR|YLR|YXLR|Y2XLR)\b/i;
 
 // --- Helper Functions ---
 const distance = (p1: Point, p2: Point) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
@@ -66,31 +67,27 @@ const isPointInPolygon = (p: Point, polygon: Point[]) => {
 
 const extractData = (dxf: any) => {
   const polylines: Polyline[] = [];
-  const rawTexts: TextEntity[] = [];
+  const rawTexts: {x:number, y:number, text:string}[] = [];
 
   if (!dxf || !dxf.entities) return { polylines, rawTexts };
 
   dxf.entities.forEach((entity: any) => {
-    // REGLA NUEVA: Escanear TODO el texto buscando tallas
+    // Escaneo de texto con el NUEVO REGEX
     if (entity.type === 'TEXT' || entity.type === 'MTEXT') {
         const content = (entity.text || '').trim();
-        // Buscar patrón de talla
         const match = content.match(SIZE_REGEX);
         
         if (match) {
-            // ¡ENCONTRADO! Lo guardamos directamente
-            rawTexts.push({
-                x: entity.startPoint.x,
-                y: entity.startPoint.y,
-                text: match[0].toUpperCase(), // La talla limpia (ej: "M")
-                layer: 'BOARDS',
-                height: entity.height || 1.0
+            // Guardamos coordenada y la talla LIMPIA (ej: "YXL")
+            rawTexts.push({ 
+                x: entity.startPoint.x, 
+                y: entity.startPoint.y, 
+                text: match[0].toUpperCase() 
             });
         }
         return; 
     }
 
-    // Geometría
     let points: Point[] = [];
     let closed = false;
 
@@ -172,7 +169,7 @@ const detectFrame = (polylines: Polyline[]): string | null => {
     if (!poly.closed) return;
     const bounds = getPolylineBounds(poly.points);
     const area = bounds.width * bounds.height;
-    if (area > maxArea && bounds.width > 50) {
+    if (area > maxArea && bounds.width > 50) { 
       maxArea = area;
       frameId = poly.id;
     }
@@ -202,6 +199,83 @@ const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[]
   });
 };
 
+// --- ESTRATEGIA DE BLOQUES RESTAURADA ---
+const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number, text:string}[]): TextEntity[] => {
+    // 1. Detectar Líneas Divisorias Verticales
+    const dividers: number[] = [];
+    polylines.forEach(p => {
+        const bounds = getPolylineBounds(p.points);
+        // Línea vertical larga = Divisor de tallas en Gerber
+        if (bounds.height > 40 && bounds.width < 0.5) {
+            dividers.push(bounds.minX);
+        }
+    });
+    
+    dividers.sort((a, b) => a - b);
+    
+    // Bounds globales para cerrar la primera y última zona
+    let globalMinX = Infinity, globalMaxX = -Infinity;
+    polylines.forEach(p => {
+        const b = getPolylineBounds(p.points);
+        if (b.minX < globalMinX) globalMinX = b.minX;
+        if (b.maxX > globalMaxX) globalMaxX = b.maxX;
+    });
+
+    const zones = [globalMinX, ...dividers, globalMaxX];
+    const finalLabels: TextEntity[] = [];
+
+    // 2. Procesar cada Bloque
+    for (let i = 0; i < zones.length - 1; i++) {
+        const startX = zones[i];
+        const endX = zones[i+1];
+        
+        // Ignorar zonas basura muy delgadas
+        if ((endX - startX) < 5) continue;
+
+        // Buscar textos de tallas en este bloque
+        // Como dijiste: "En este bloque solo encontrarás M"
+        const textInZone = rawTexts.find(t => t.x >= startX && t.x <= endX);
+        
+        if (textInZone) {
+            const sizeLabel = textInZone.text; // Esta es la talla única del bloque
+
+            // Buscar la pieza más grande del bloque para ponerle la etiqueta
+            let largestPiece: Polyline | null = null;
+            let maxArea = 0;
+
+            // Filtramos piezas que estén DENTRO de este bloque X
+            const piecesInZone = polylines.filter(p => {
+                const pb = getPolylineBounds(p.points);
+                const centerX = (pb.minX + pb.maxX) / 2;
+                return p.closed && p.layer === 'CUT' && centerX >= startX && centerX <= endX;
+            });
+
+            piecesInZone.forEach(p => {
+                const pb = getPolylineBounds(p.points);
+                const area = pb.width * pb.height;
+                if (area > maxArea) {
+                    maxArea = area;
+                    largestPiece = p;
+                }
+            });
+
+            // Si hay pieza, ponemos la etiqueta ENCIMA
+            if (largestPiece) {
+                const pb = getPolylineBounds(largestPiece.points);
+                finalLabels.push({
+                    x: (pb.minX + pb.maxX) / 2, // Centro X
+                    y: pb.maxY + TEXT_OFFSET,   // Arriba de la pieza (para que se vea claro)
+                    text: sizeLabel,
+                    layer: 'BOARDS',
+                    height: TEXT_SIZE
+                });
+            }
+        }
+    }
+
+    return finalLabels;
+};
+
 export const processDxf = (dxfString: string): ProcessedResult => {
   const isGerber = dxfString.includes("Gerber Technology");
   const parser = new DxfParser();
@@ -221,10 +295,11 @@ export const processDxf = (dxfString: string): ProcessedResult => {
   const frameId = detectFrame(processed);
   processed = assignLayers(processed, frameId);
   
-  // MODIFICACIÓN DE EMERGENCIA: 
-  // Devolvemos TODAS las tallas encontradas sin filtrar por posición
-  // Para verificar que sí se están leyendo.
-  const finalLabels = rawTexts;
+  // ACTIVAMOS LA LÓGICA DE ZONAS
+  let finalLabels: TextEntity[] = [];
+  if (isGerber && rawTexts.length > 0) {
+      finalLabels = groupLabelsByZones(processed, rawTexts);
+  }
 
   let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
   let hasContent = false;
@@ -240,7 +315,7 @@ export const processDxf = (dxfString: string): ProcessedResult => {
 
   return {
     polylines: processed,
-    labels: finalLabels, // Enviamos TODO lo encontrado
+    labels: finalLabels,
     stats: {
       originalCount, healedCount: processed.length, debrisRemoved,
       bounds: { minX, minY, maxX, maxY },
@@ -277,7 +352,7 @@ export const generateR12 = (polylines: Polyline[], labels: TextEntity[] = []): s
           output += ` 30\n0.0\n`;
           output += ` 40\n${lbl.height.toFixed(6)}\n`;
           output += `  1\n${lbl.text}\n`;
-          output += ` 72\n4\n`; 
+          output += ` 72\n4\n`; // Middle Center
           output += ` 11\n${lbl.x.toFixed(6)}\n`; 
           output += ` 21\n${lbl.y.toFixed(6)}\n`; 
       });
