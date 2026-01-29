@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, Download, Settings, LogOut, FileCode, Shield, Layers, Scissors, Trash2 } from 'lucide-react';
+import { Upload, Download, Settings, LogOut, FileCode, Shield, Layers, Scissors, Trash2, BoxSelect } from 'lucide-react';
 import { Login } from './components/Login';
 import { Viewer } from './components/Viewer';
 import { AdminPanel } from './components/AdminPanelNew'; 
@@ -10,12 +10,15 @@ function App() {
   const [session, setSession] = useState<UserSession | null>(null);
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [polylines, setPolylines] = useState<Polyline[]>([]);
-  // ESTO ES CLAVE: Estado para las etiquetas
   const [labels, setLabels] = useState<any[]>([]); 
   const [stats, setStats] = useState<ProcessedResult['stats'] | null>(null);
   const [filename, setFilename] = useState<string>('');
   const [showMetrics, setShowMetrics] = useState(false);
   
+  // NUEVOS ESTADOS PARA EL MODO MANUAL
+  const [dxfContent, setDxfContent] = useState<string>(''); // Guardar contenido raw
+  const [preserveFrame, setPreserveFrame] = useState(true); // Estado del checkbox
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -41,7 +44,21 @@ function App() {
     setLabels([]); 
     setStats(null);
     setFilename('');
+    setDxfContent('');
     setIsAdminOpen(false);
+  };
+
+  // Función auxiliar para procesar (se usa al cargar y al cambiar checkbox)
+  const runProcessing = (text: string, keepFrame: boolean) => {
+    try {
+        const result = processDxf(text, { preserveFrame: keepFrame });
+        setPolylines(result.polylines);
+        setLabels(result.labels || []); 
+        setStats(result.stats);
+    } catch (err) {
+        alert('Error processing DXF file.');
+        console.error(err);
+    }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -53,39 +70,34 @@ function App() {
     const reader = new FileReader();
     reader.onload = (event) => {
       const text = event.target?.result as string;
-      try {
-        const result = processDxf(text);
-        setPolylines(result.polylines);
-        // AQUÍ SE GUARDAN LAS ETIQUETAS
-        setLabels(result.labels || []); 
-        setStats(result.stats);
-      } catch (err) {
-        alert('Error processing DXF file. Ensure it is a valid text DXF.');
-        console.error(err);
-      }
+      setDxfContent(text); // Guardamos el contenido crudo
+      runProcessing(text, preserveFrame); // Procesamos con la opción actual
     };
     reader.readAsText(file);
     e.target.value = '';
   };
 
+  // Manejador del checkbox
+  const togglePreserveFrame = () => {
+      const newValue = !preserveFrame;
+      setPreserveFrame(newValue);
+      if (dxfContent) {
+          runProcessing(dxfContent, newValue); // Re-procesar al instante
+      }
+  };
+
   const handleExport = () => {
     if (polylines.length === 0) return;
-    
     const output = generateR12(polylines, labels);
-    
     const blob = new Blob([output], { type: 'application/dxf' });
     const url = URL.createObjectURL(blob);
-    
     const link = document.createElement('a');
     link.href = url;
     link.download = `SUMMA_READY_${filename || 'export'}.dxf`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    
-    if (stats) {
-      logExport(filename, stats.materialHeightYards, stats.materialWidthYards);
-    }
+    if (stats) logExport(filename, stats.materialHeightYards, stats.materialWidthYards);
   };
 
   if (!session) {
@@ -113,7 +125,7 @@ function App() {
           <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded-sm border border-slate-700 transition-all text-sm font-medium">
             <Upload size={18} /> LOAD DXF
           </button>
-          <button onClick={handleExport} disabled={polylines.length === 0} className={`flex items-center gap-2 px-4 py-2 rounded-sm border transition-all text-sm font-bold tracking-wide ${polylines.length > 0 ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500' : 'bg-slate-800 text-slate-600 border-slate-800 cursor-not-allowed'}`}>
+          <button onClick={handleExport} disabled={polylines.length === 0} className={`flex items-center gap-2 px-4 py-2 rounded-sm border transition-all text-sm font-bold tracking-wide ${polylines.length > 0 ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.4)]' : 'bg-slate-800 text-slate-600 border-slate-800 cursor-not-allowed'}`}>
             <Download size={18} /> EXPORT R12
           </button>
           <div className="w-px h-8 bg-slate-800 mx-2"></div>
@@ -130,6 +142,26 @@ function App() {
 
       <div className="flex-1 flex overflow-hidden relative">
         <aside className="w-80 bg-slate-900 border-r border-slate-800 flex flex-col z-20 shadow-xl">
+          
+          {/* SECCIÓN NUEVA: PROCESSING OPTIONS */}
+          <div className="p-6 border-b border-slate-800">
+             <h2 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
+                <Settings size={14} /> Processing Options
+             </h2>
+             <div className="bg-slate-950 p-3 rounded border border-slate-800">
+                <label className="flex items-center gap-3 cursor-pointer group">
+                    <div className={`w-5 h-5 border rounded flex items-center justify-center transition-colors ${preserveFrame ? 'bg-emerald-600 border-emerald-500' : 'border-slate-600 bg-slate-900'}`}>
+                        {preserveFrame && <div className="w-2.5 h-2.5 bg-white rounded-sm"></div>}
+                    </div>
+                    <input type="checkbox" checked={preserveFrame} onChange={togglePreserveFrame} className="hidden" />
+                    <div>
+                        <div className="text-sm font-bold text-slate-200 group-hover:text-white transition-colors">Preserve Frame & Dividers</div>
+                        <div className="text-[10px] text-slate-500">Uncheck if frame is detected wrong</div>
+                    </div>
+                </label>
+             </div>
+          </div>
+
           <div className="p-6 border-b border-slate-800">
             <h2 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">File Statistics</h2>
             {stats ? (
