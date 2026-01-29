@@ -16,13 +16,13 @@ export const Viewer: React.FC<ViewerProps> = ({ polylines, labels = [], onPolyli
   const [lastPos, setLastPos] = useState({ x: 0, y: 0 });
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // FUNCIÓN CORREGIDA: Solo recalcula la posición, NO recarga la página
+  // FUNCIÓN ENCAJAR ARREGLADA (Sin recarga)
   const fitScreen = () => {
     if (polylines.length === 0 || !containerRef.current) return;
 
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     
-    // Calcular limites excluyendo el marco si es muy grande
+    // Ignoramos el marco si es muy grande para encajar solo las piezas
     polylines.forEach(p => p.points.forEach(v => {
       minX = Math.min(minX, v.x); minY = Math.min(minY, v.y);
       maxX = Math.max(maxX, v.x); maxY = Math.max(maxY, v.y);
@@ -103,8 +103,9 @@ export const Viewer: React.FC<ViewerProps> = ({ polylines, labels = [], onPolyli
                 d={`M ${poly.points.map(p => `${p.x},${p.y}`).join(' L ')} ${poly.closed ? 'Z' : ''}`}
                 fill={poly.layer === 'CUT' && poly.closed ? 'rgba(16, 185, 129, 0.05)' : 'transparent'}
                 stroke={selectedId === poly.id ? '#fbbf24' : (poly.layer === 'BOARDS' ? '#ef4444' : '#10b981')}
-                // ARREGLO DE CALIDAD: Grosor dinámico inverso al zoom para que siempre se vea fina
-                strokeWidth={1.5 / scale} 
+                // VISUALIZACIÓN CORREGIDA: non-scaling-stroke
+                vectorEffect="non-scaling-stroke"
+                strokeWidth="1.5"
                 className="pointer-events-auto cursor-pointer hover:opacity-80 transition-opacity"
                 onClick={(e) => { e.stopPropagation(); setSelectedId(poly.id); }}
                 onDoubleClick={(e) => { e.stopPropagation(); toggleLayer(poly.id); }}
@@ -117,7 +118,8 @@ export const Viewer: React.FC<ViewerProps> = ({ polylines, labels = [], onPolyli
                 x={lbl.x}
                 y={lbl.y}
                 fill="#ef4444" 
-                fontSize={lbl.height * 10} // Tamaño ajustado
+                // Ajuste de tamaño para que se vea bien
+                fontSize={lbl.height} 
                 textAnchor="middle"
                 alignmentBaseline="middle"
                 transform={`scale(1, -1) translate(0, ${-2 * lbl.y})`} 
