@@ -22,7 +22,7 @@ export interface ProcessedResult {
 const HEAL_TOLERANCE = 0.05;
 const MIN_ENTITY_LENGTH = 3.0;
 const GERBER_MIN_LENGTH = 0.5;
-const TEXT_SIZE = 2.5; // TEXTO MUCHO MÁS GRANDE
+const TEXT_SIZE = 2.0; // TEXTO MUCHO MÁS GRANDE
 const YARDS_DIVISOR = 36.0;
 
 const SIZE_REGEX = /\b(XS|S|M|L|XL|2XL|3XL|4XL|YS|YM|YL|YXL|[\d]+T|[\d]+Y)\b/i;
