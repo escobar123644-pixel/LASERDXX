@@ -22,11 +22,9 @@ export interface ProcessedResult {
 const HEAL_TOLERANCE = 0.05;
 const MIN_ENTITY_LENGTH = 3.0;
 const GERBER_MIN_LENGTH = 0.5;
-// Aumentamos el tamaño del texto para que esa ÚNICA etiqueta se vea clara
-const TEXT_SIZE = 2.0; 
+const TEXT_SIZE = 2.5; // TEXTO MUCHO MÁS GRANDE
 const YARDS_DIVISOR = 36.0;
 
-// Regex para capturar la talla (S, M, L, XL, números...)
 const SIZE_REGEX = /\b(XS|S|M|L|XL|2XL|3XL|4XL|YS|YM|YL|YXL|[\d]+T|[\d]+Y)\b/i;
 
 // --- Helper Functions ---
@@ -72,21 +70,15 @@ const extractData = (dxf: any) => {
   if (!dxf || !dxf.entities) return { polylines, rawTexts };
 
   dxf.entities.forEach((entity: any) => {
-    // Si es texto, intentamos ver si contiene una talla
-    if (entity.type === 'TEXT' || entity.type === 'MTEXT') {
+    if (entity.layer === 'ABC' && (entity.type === 'TEXT' || entity.type === 'MTEXT')) {
         const content = (entity.text || '').trim();
         const match = content.match(SIZE_REGEX);
         if (match) {
-            rawTexts.push({
-                x: entity.startPoint.x,
-                y: entity.startPoint.y,
-                text: match[0].toUpperCase() // Guardamos "M", "S", "XL"
-            });
+            rawTexts.push({ x: entity.startPoint.x, y: entity.startPoint.y, text: match[0].toUpperCase() });
         }
-        return; 
+        return;
     }
 
-    // Geometría
     let points: Point[] = [];
     let closed = false;
 
@@ -161,19 +153,46 @@ const filterDebris = (polylines: Polyline[], isGerber: boolean): Polyline[] => {
   });
 };
 
+// CORRECCIÓN DE DETECCIÓN DE MARCO (Para que no reste consumo incorrectamente)
 const detectFrame = (polylines: Polyline[]): string | null => {
   let maxArea = 0;
   let frameId: string | null = null;
+  
   polylines.forEach(poly => {
     if (!poly.closed) return;
     const bounds = getPolylineBounds(poly.points);
     const area = bounds.width * bounds.height;
-    if (area > maxArea) {
-      const isInchScale = bounds.width > 50 && bounds.width < 70;
-      const isMmScale = bounds.width > 1270 && bounds.width < 1780;
-      if (isInchScale || isMmScale) { maxArea = area; frameId = poly.id; }
+    
+    // Solo consideramos marco si es MUY grande (más de 50 pulgadas)
+    // Y tiene formato rectangular (width > height)
+    if (area > maxArea && bounds.width > 50) {
+      maxArea = area;
+      frameId = poly.id;
     }
   });
+  
+  // Seguridad: Si el supuesto marco tiene dentro menos de 2 piezas, NO es un marco, es una pieza grande.
+  if (frameId) {
+      const framePoly = polylines.find(p => p.id === frameId);
+      if (framePoly) {
+          const start = framePoly.points[0];
+          // Verificamos cuántas piezas hay dentro de este "marco"
+          let itemsInside = 0;
+          polylines.forEach(p => {
+              if (p.id !== frameId && p.points.length > 0) {
+                  // Chequeo rápido de bounding box
+                  const b = getPolylineBounds(p.points);
+                  const fb = getPolylineBounds(framePoly.points);
+                  if (b.minX >= fb.minX && b.maxX <= fb.maxX && b.minY >= fb.minY && b.maxY <= fb.maxY) {
+                      itemsInside++;
+                  }
+              }
+          });
+          // Si no contiene nada, es una pieza, no un marco de mesa.
+          if (itemsInside === 0) return null;
+      }
+  }
+  
   return frameId;
 };
 
@@ -194,52 +213,34 @@ const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[]
   });
 };
 
-// --- LOGICA MAESTRA: ETIQUETADO POR ZONAS ---
 const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number, text:string}[]): TextEntity[] => {
-    // 1. Encontrar Líneas Divisorias Verticales
-    // Buscamos líneas que sean altas y muy delgadas (verticales puras)
     const dividers: number[] = [];
     polylines.forEach(p => {
         const bounds = getPolylineBounds(p.points);
-        // Altura > 40 (casi el alto de la tela) y Ancho casi 0
-        if (bounds.height > 40 && bounds.width < 0.5) {
-            dividers.push(bounds.minX);
-        }
+        if (bounds.height > 40 && bounds.width < 0.5) dividers.push(bounds.minX);
     });
     
-    // Ordenamos las divisiones de izquierda a derecha
     dividers.sort((a, b) => a - b);
-    
-    // Agregamos el principio y fin absolutos del dibujo para cerrar las zonas
     const allPoints = polylines.flatMap(p => p.points);
     const globalBounds = getPolylineBounds(allPoints);
     const zones = [globalBounds.minX, ...dividers, globalBounds.maxX];
 
     const finalLabels: TextEntity[] = [];
 
-    // 2. Procesar cada ZONA (Bloque entre líneas)
     for (let i = 0; i < zones.length - 1; i++) {
         const startX = zones[i];
         const endX = zones[i+1];
-        
-        // Ignorar zonas demasiado pequeñas (posibles errores de dibujo)
         if ((endX - startX) < 2) continue;
 
-        // Buscar TODOS los textos válidos en esta zona
-        // Como tú dijiste: "En este bloque solo encontrarás M"
         const textInZone = rawTexts.find(t => t.x >= startX && t.x <= endX);
         
-        // Si encontramos AL MENOS UN texto de talla en la zona, ese es el bueno.
         if (textInZone) {
-            const sizeLabel = textInZone.text; // Ej: "M"
-
-            // Ahora buscamos la PIEZA MÁS GRANDE en esta zona para ponerle la etiqueta
+            const sizeLabel = textInZone.text;
             let largestPiece: Polyline | null = null;
             let maxArea = 0;
 
             const piecesInZone = polylines.filter(p => {
                 const pb = getPolylineBounds(p.points);
-                // La pieza debe estar mayormente dentro de la zona
                 const centerX = (pb.minX + pb.maxX) / 2;
                 return p.closed && p.layer === 'CUT' && centerX >= startX && centerX <= endX;
             });
@@ -253,12 +254,11 @@ const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number
                 }
             });
 
-            // Si encontramos pieza grande, ponemos la etiqueta ENCIMA
             if (largestPiece) {
-                const pb = getPolylineBounds(largestPiece.points);
+                const pb = getPolylineBounds(largestPiece!.points);
                 finalLabels.push({
-                    x: (pb.minX + pb.maxX) / 2, // Centro X
-                    y: (pb.minY + pb.maxY) / 2, // Centro Y
+                    x: (pb.minX + pb.maxX) / 2,
+                    y: (pb.minY + pb.maxY) / 2,
                     text: sizeLabel,
                     layer: 'BOARDS',
                     height: TEXT_SIZE
@@ -266,7 +266,6 @@ const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number
             }
         }
     }
-
     return finalLabels;
 };
 
@@ -282,29 +281,30 @@ export const processDxf = (dxfString: string): ProcessedResult => {
   let processed = healPolylines(rawPolylines);
   processed = removeCollinearKnots(processed);
   const healedCount = processed.length;
-  
   processed = filterDebris(processed, isGerber);
   const debrisRemoved = healedCount - processed.length;
   
   const frameId = detectFrame(processed);
   processed = assignLayers(processed, frameId);
   
-  // APLICAR LÓGICA DE ZONAS (Si es Gerber)
   let finalLabels: TextEntity[] = [];
   if (isGerber && rawTexts.length > 0) {
       finalLabels = groupLabelsByZones(processed, rawTexts);
   }
 
+  // CÁLCULO DE CONSUMO CORREGIDO:
+  // Iteramos para encontrar los extremos reales de las piezas (excluyendo el marco)
   let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
   let hasContent = false;
   processed.forEach(p => {
-    if (frameId && p.id === frameId) return;
+    if (frameId && p.id === frameId) return; // Saltamos el marco para el cálculo
     hasContent = true;
     p.points.forEach(v => {
       minX = Math.min(minX, v.x); minY = Math.min(minY, v.y);
       maxX = Math.max(maxX, v.x); maxY = Math.max(maxY, v.y);
     });
   });
+  
   if (!hasContent) { minX=0; minY=0; maxX=0; maxY=0; }
 
   return {
@@ -313,8 +313,8 @@ export const processDxf = (dxfString: string): ProcessedResult => {
     stats: {
       originalCount, healedCount: processed.length, debrisRemoved,
       bounds: { minX, minY, maxX, maxY },
-      materialHeightYards: (maxY - minY) / YARDS_DIVISOR,
-      materialWidthYards: (maxX - minX) / YARDS_DIVISOR
+      materialHeightYards: Math.abs(maxY - minY) / YARDS_DIVISOR, // Asegurar positivo
+      materialWidthYards: Math.abs(maxX - minX) / YARDS_DIVISOR
     }
   };
 };
