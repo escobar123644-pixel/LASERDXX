@@ -10,6 +10,7 @@ function App() {
   const [session, setSession] = useState<UserSession | null>(null);
   const [isAdminOpen, setIsAdminOpen] = useState(false);
   const [polylines, setPolylines] = useState<Polyline[]>([]);
+  // ESTO ES CLAVE: Estado para las etiquetas
   const [labels, setLabels] = useState<any[]>([]); 
   const [stats, setStats] = useState<ProcessedResult['stats'] | null>(null);
   const [filename, setFilename] = useState<string>('');
@@ -55,10 +56,11 @@ function App() {
       try {
         const result = processDxf(text);
         setPolylines(result.polylines);
+        // AQUÍ SE GUARDAN LAS ETIQUETAS
         setLabels(result.labels || []); 
         setStats(result.stats);
       } catch (err) {
-        alert('Error processing DXF file.');
+        alert('Error processing DXF file. Ensure it is a valid text DXF.');
         console.error(err);
       }
     };
@@ -111,7 +113,7 @@ function App() {
           <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded-sm border border-slate-700 transition-all text-sm font-medium">
             <Upload size={18} /> LOAD DXF
           </button>
-          <button onClick={handleExport} disabled={polylines.length === 0} className={`flex items-center gap-2 px-4 py-2 rounded-sm border transition-all text-sm font-bold tracking-wide ${polylines.length > 0 ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.4)]' : 'bg-slate-800 text-slate-600 border-slate-800 cursor-not-allowed'}`}>
+          <button onClick={handleExport} disabled={polylines.length === 0} className={`flex items-center gap-2 px-4 py-2 rounded-sm border transition-all text-sm font-bold tracking-wide ${polylines.length > 0 ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500' : 'bg-slate-800 text-slate-600 border-slate-800 cursor-not-allowed'}`}>
             <Download size={18} /> EXPORT R12
           </button>
           <div className="w-px h-8 bg-slate-800 mx-2"></div>
@@ -160,7 +162,7 @@ function App() {
              <Viewer polylines={polylines} onPolylinesChange={setPolylines} />
            ) : (
              <div className="absolute inset-0 flex items-center justify-center text-slate-700">
-                <div className="text-center"><Upload size={48} className="mx-auto mb-4 opacity-50" /><p className="text-lg font-medium">Ready</p></div>
+                <div className="text-center"><Upload size={48} className="mx-auto mb-4 opacity-50" /><p className="text-lg font-medium">Ready for input</p></div>
              </div>
            )}
         </main>
