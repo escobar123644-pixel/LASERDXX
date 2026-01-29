@@ -22,11 +22,11 @@ export interface ProcessedResult {
 const HEAL_TOLERANCE = 0.05;
 const MIN_ENTITY_LENGTH = 3.0;
 const GERBER_MIN_LENGTH = 0.5;
-const TEXT_SIZE = 2.0; 
 const YARDS_DIVISOR = 36.0;
 
-// Regex AMPLIADO para detectar cualquier variante de talla
-const SIZE_REGEX = /\b(XS|S|M|L|XL|2XL|3XL|4XL|YS|YM|YL|YXL|[\d]+T|[\d]+Y)\b/i;
+// REGEX RELAJADO: Busca la talla incluso si está pegada a otros caracteres
+// Detecta: "S", "M", "L", "XL", "2XL", "YS", "SIZE:S", "SZ-M"
+const SIZE_REGEX = /(XS|S|M|L|XL|2XL|3XL|4XL|YS|YM|YL|YXL|[\d]+T|[\d]+Y)/i;
 
 // --- Helper Functions ---
 const distance = (p1: Point, p2: Point) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
@@ -66,28 +66,31 @@ const isPointInPolygon = (p: Point, polygon: Point[]) => {
 
 const extractData = (dxf: any) => {
   const polylines: Polyline[] = [];
-  const rawTexts: {x:number, y:number, text:string}[] = [];
+  const rawTexts: TextEntity[] = [];
 
   if (!dxf || !dxf.entities) return { polylines, rawTexts };
 
   dxf.entities.forEach((entity: any) => {
-    // CAMBIO IMPORTANTE: NO filtramos por capa ABC. Leemos TODO el texto.
+    // REGLA NUEVA: Escanear TODO el texto buscando tallas
     if (entity.type === 'TEXT' || entity.type === 'MTEXT') {
         const content = (entity.text || '').trim();
-        // Intentamos encontrar una talla en el texto
+        // Buscar patrón de talla
         const match = content.match(SIZE_REGEX);
         
-        // Si encontramos una talla, guardamos la coordenada y LA TALLA (no todo el texto basura)
         if (match) {
-            rawTexts.push({ 
-                x: entity.startPoint.x, 
-                y: entity.startPoint.y, 
-                text: match[0].toUpperCase() 
+            // ¡ENCONTRADO! Lo guardamos directamente
+            rawTexts.push({
+                x: entity.startPoint.x,
+                y: entity.startPoint.y,
+                text: match[0].toUpperCase(), // La talla limpia (ej: "M")
+                layer: 'BOARDS',
+                height: entity.height || 1.0
             });
         }
         return; 
     }
 
+    // Geometría
     let points: Point[] = [];
     let closed = false;
 
@@ -169,12 +172,11 @@ const detectFrame = (polylines: Polyline[]): string | null => {
     if (!poly.closed) return;
     const bounds = getPolylineBounds(poly.points);
     const area = bounds.width * bounds.height;
-    if (area > maxArea && bounds.width > 50) { // Solo marcos grandes
+    if (area > maxArea && bounds.width > 50) {
       maxArea = area;
       frameId = poly.id;
     }
   });
-  // Validación extra: Si el marco está vacío, no es marco
   if (frameId) {
       const frame = polylines.find(p => p.id === frameId);
       const hasChildren = polylines.some(p => p.id !== frameId && isPointInPolygon(p.points[0], frame!.points));
@@ -200,67 +202,6 @@ const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[]
   });
 };
 
-// --- ESTRATEGIA ROBUSTA: "La Pieza Más Grande Manda" ---
-const generateRobustLabels = (polylines: Polyline[], rawTexts: {x:number, y:number, text:string}[]): TextEntity[] => {
-    const finalLabels: TextEntity[] = [];
-    const pieces = polylines.filter(p => p.closed && p.layer === 'CUT');
-
-    // 1. Mapeamos cada pieza con los textos que tiene dentro
-    const piecesWithText = pieces.map(p => {
-        const bounds = getPolylineBounds(p.points);
-        const area = bounds.width * bounds.height;
-        // Buscar texto dentro de la pieza
-        const textsInside = rawTexts.filter(t => isPointInPolygon({x: t.x, y: t.y}, p.points));
-        
-        return {
-            piece: p,
-            area: area,
-            bounds: bounds,
-            text: textsInside.length > 0 ? textsInside[0].text : null // Nos quedamos con la primera talla encontrada
-        };
-    }).filter(item => item.text !== null); // Solo nos importan las que tienen texto
-
-    // 2. Agrupamos por proximidad (Clustering simple en el eje X)
-    // Ordenamos por posición X
-    piecesWithText.sort((a, b) => a.bounds.minX - b.bounds.minX);
-
-    if (piecesWithText.length === 0) return [];
-
-    let currentGroup = [piecesWithText[0]];
-    const groups = [];
-
-    for (let i = 1; i < piecesWithText.length; i++) {
-        const prev = currentGroup[currentGroup.length - 1];
-        const curr = piecesWithText[i];
-
-        // Si están cerca en X (menos de 50 unidades de distancia), son del mismo bloque
-        if (curr.bounds.minX - prev.bounds.maxX < 50) {
-            currentGroup.push(curr);
-        } else {
-            groups.push(currentGroup);
-            currentGroup = [curr];
-        }
-    }
-    groups.push(currentGroup);
-
-    // 3. Para cada grupo, seleccionamos SOLO LA PIEZA MÁS GRANDE para ponerle la etiqueta
-    groups.forEach(group => {
-        // Encontrar la pieza con mayor área del grupo
-        const winner = group.reduce((prev, current) => (prev.area > current.area) ? prev : current);
-        
-        // Crear etiqueta para el ganador
-        finalLabels.push({
-            x: (winner.bounds.minX + winner.bounds.maxX) / 2,
-            y: (winner.bounds.minY + winner.bounds.maxY) / 2,
-            text: winner.text!,
-            layer: 'BOARDS',
-            height: TEXT_SIZE
-        });
-    });
-
-    return finalLabels;
-};
-
 export const processDxf = (dxfString: string): ProcessedResult => {
   const isGerber = dxfString.includes("Gerber Technology");
   const parser = new DxfParser();
@@ -280,12 +221,10 @@ export const processDxf = (dxfString: string): ProcessedResult => {
   const frameId = detectFrame(processed);
   processed = assignLayers(processed, frameId);
   
-  // GENERAR ETIQUETAS
-  let finalLabels: TextEntity[] = [];
-  // Si es Gerber y hay textos, intentamos generar etiquetas
-  if (isGerber && rawTexts.length > 0) {
-      finalLabels = generateRobustLabels(processed, rawTexts);
-  }
+  // MODIFICACIÓN DE EMERGENCIA: 
+  // Devolvemos TODAS las tallas encontradas sin filtrar por posición
+  // Para verificar que sí se están leyendo.
+  const finalLabels = rawTexts;
 
   let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
   let hasContent = false;
@@ -301,7 +240,7 @@ export const processDxf = (dxfString: string): ProcessedResult => {
 
   return {
     polylines: processed,
-    labels: finalLabels,
+    labels: finalLabels, // Enviamos TODO lo encontrado
     stats: {
       originalCount, healedCount: processed.length, debrisRemoved,
       bounds: { minX, minY, maxX, maxY },
