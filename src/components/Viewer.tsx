@@ -18,25 +18,19 @@ export const Viewer: React.FC<ViewerProps> = ({ polylines, labels = [], onPolyli
 
   const fitScreen = () => {
     if (polylines.length === 0 || !containerRef.current) return;
-
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    
     polylines.forEach(p => p.points.forEach(v => {
       minX = Math.min(minX, v.x); minY = Math.min(minY, v.y);
       maxX = Math.max(maxX, v.x); maxY = Math.max(maxY, v.y);
     }));
-
     if (minX === Infinity) return;
-
     const width = maxX - minX;
     const height = maxY - minY;
     const containerWidth = containerRef.current.clientWidth;
     const containerHeight = containerRef.current.clientHeight;
-
     const scaleX = (containerWidth * 0.95) / width;
     const scaleY = (containerHeight * 0.95) / height;
     const newScale = Math.min(scaleX, scaleY);
-
     setScale(newScale);
     setOffset({
       x: (containerWidth - width * newScale) / 2 - minX * newScale,
@@ -77,50 +71,37 @@ export const Viewer: React.FC<ViewerProps> = ({ polylines, labels = [], onPolyli
       <div ref={containerRef} className="w-full h-full cursor-move" onWheel={handleWheel} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}>
         <svg className="w-full h-full pointer-events-none">
           <g transform={`translate(${offset.x}, ${offset.y}) scale(${scale}, ${-scale})`}>
-            
-            {/* 1. LÍNEAS (Dibujo) */}
             {polylines.map((poly) => (
-              <path
-                key={poly.id}
+              <path key={poly.id}
                 d={`M ${poly.points.map(p => `${p.x},${p.y}`).join(' L ')} ${poly.closed ? 'Z' : ''}`}
                 fill={poly.layer === 'CUT' && poly.closed ? 'rgba(16, 185, 129, 0.05)' : 'transparent'}
                 stroke={selectedId === poly.id ? '#fbbf24' : (poly.layer === 'BOARDS' ? '#ef4444' : '#10b981')}
-                strokeWidth={1.5 / scale} // Líneas finas siempre
+                strokeWidth={1.5 / scale}
                 className="pointer-events-auto cursor-pointer hover:opacity-80"
                 onClick={(e) => { e.stopPropagation(); setSelectedId(poly.id); }}
                 onDoubleClick={(e) => { e.stopPropagation(); toggleLayer(poly.id); }}
               />
             ))}
-
-            {/* 2. ETIQUETAS (Texto) - CORREGIDO */}
+            
+            {/* ETIQUETAS FORZADAS */}
             {labels && labels.map((lbl, idx) => (
-              // Usamos un grupo <g> trasladado a la posición X,Y
-              // Y luego escalamos (1, -1) para poner el texto derecho (porque el SVG está invertido)
               <g key={`lbl-${idx}`} transform={`translate(${lbl.x}, ${lbl.y}) scale(1, -1)`}>
-                <text
-                  x="0" 
-                  y="0"
-                  fill="#FACC15" // AMARILLO BRILLANTE PARA QUE SE VEA BIEN
-                  // El tamaño se ajusta: O usa la altura real del texto o un mínimo de 14px en pantalla
-                  fontSize={Math.max(lbl.height, 14 / scale)} 
-                  textAnchor="middle"
-                  alignmentBaseline="middle"
-                  fontWeight="bold"
-                  style={{ 
-                    pointerEvents: 'none', 
-                    userSelect: 'none', 
-                    textShadow: '0px 0px 3px #000' // Sombra para resaltar sobre líneas
-                  }}
-                >
+                {/* Círculo indicador para ver dónde está el punto */}
+                <circle r={5 / scale} fill="#FACC15" opacity="0.5" />
+                
+                {/* Texto */}
+                <text x="0" y="0"
+                  fill="#FACC15" 
+                  fontSize={Math.max(lbl.height * 2, 20 / scale)} // Tamaño mínimo 20px en pantalla
+                  textAnchor="middle" alignmentBaseline="middle" fontWeight="bold"
+                  style={{ pointerEvents: 'none', userSelect: 'none', textShadow: '0px 0px 4px black' }}>
                   {lbl.text}
                 </text>
               </g>
             ))}
-
           </g>
         </svg>
       </div>
-
       {selectedId && <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-slate-900 border border-slate-700 px-4 py-2 rounded-full text-xs text-slate-300 shadow-xl flex items-center gap-2"><MousePointer2 size={12} className="text-amber-400" /> ID: <span className="font-mono text-emerald-400">{selectedId}</span></div>}
     </div>
   );
