@@ -1,243 +1,147 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { Polyline } from '../utils/dxfUtils';
+import React, { useEffect, useRef, useState } from 'react';
+import { ZoomIn, ZoomOut, Maximize, MousePointer2 } from 'lucide-react';
+import { Polyline, TextEntity } from '../utils/dxfUtils'; // Asegúrate de importar TextEntity
 
 interface ViewerProps {
   polylines: Polyline[];
-  onPolylinesChange: (newPolylines: Polyline[]) => void;
+  labels?: TextEntity[]; // Nueva propiedad para recibir etiquetas
+  onPolylinesChange: (polylines: Polyline[]) => void;
 }
 
-export const Viewer: React.FC<ViewerProps> = ({ polylines, onPolylinesChange }) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+export const Viewer: React.FC<ViewerProps> = ({ polylines, labels = [], onPolylinesChange }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  
-  // Viewport State
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [scale, setScale] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
-  const [lastMouse, setLastMouse] = useState({ x: 0, y: 0 });
+  const [lastPos, setLastPos] = useState({ x: 0, y: 0 });
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // Coordinate transforms
-  const worldToScreen = useCallback((x: number, y: number, width: number, height: number) => {
-    return {
-      x: (x - pan.x) * zoom + width / 2,
-      y: -(y - pan.y) * zoom + height / 2 // Flip Y for DXF
-    };
-  }, [zoom, pan]);
-
-  // Fit to content on initial load (or when polylines change significantly?)
-  // We'll just do it once when polylines are first populated
+  // Calcular límites para centrar automáticamente
   useEffect(() => {
-    if (polylines.length > 0 && zoom === 1 && pan.x === 0 && pan.y === 0) {
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      polylines.forEach(p => p.points.forEach(v => {
-        if (v.x < minX) minX = v.x;
-        if (v.y < minY) minY = v.y;
-        if (v.x > maxX) maxX = v.x;
-        if (v.y > maxY) maxY = v.y;
-      }));
-      
-      if (minX !== Infinity) {
-        const width = maxX - minX;
-        const height = maxY - minY;
-        const centerX = minX + width / 2;
-        const centerY = minY + height / 2;
-        
-        // Auto zoom
-        const container = containerRef.current;
-        if (container) {
-          const scaleX = (container.clientWidth - 40) / width;
-          const scaleY = (container.clientHeight - 40) / height;
-          const newZoom = Math.min(scaleX, scaleY, 10); // Cap zoom
-          
-          setPan({ x: centerX, y: centerY });
-          setZoom(newZoom);
-        }
-      }
-    }
+    if (polylines.length === 0 || !containerRef.current) return;
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    
+    polylines.forEach(p => p.points.forEach(v => {
+      minX = Math.min(minX, v.x); minY = Math.min(minY, v.y);
+      maxX = Math.max(maxX, v.x); maxY = Math.max(maxY, v.y);
+    }));
+
+    if (minX === Infinity) return;
+
+    const width = maxX - minX;
+    const height = maxY - minY;
+    const containerWidth = containerRef.current.clientWidth;
+    const containerHeight = containerRef.current.clientHeight;
+
+    const scaleX = (containerWidth * 0.9) / width;
+    const scaleY = (containerHeight * 0.9) / height;
+    const newScale = Math.min(scaleX, scaleY);
+
+    setScale(newScale);
+    setOffset({
+      x: (containerWidth - width * newScale) / 2 - minX * newScale,
+      y: containerHeight - (containerHeight - height * newScale) / 2 + minY * newScale // Invertir Y para DXF
+    });
   }, [polylines]);
 
-  // Render Loop
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const container = containerRef.current;
-    if (!canvas || !container) return;
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+    setScale(s => Math.max(0.1, Math.min(s * zoomFactor, 50)));
+  };
 
-    canvas.width = container.clientWidth;
-    canvas.height = container.clientHeight;
-    
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    // Clear
-    ctx.fillStyle = '#0f172a'; // Slate-900
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // Grid
-    ctx.strokeStyle = '#1e293b'; // Slate-800
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    
-    // Draw simple grid (not infinite, just covering view)
-    // Actually simpler to just draw static grid if optimized, but dynamic is nicer.
-    // Skip grid for now to save complexity, or draw simple axes.
-    const origin = worldToScreen(0, 0, canvas.width, canvas.height);
-    
-    // Draw Origin
-    ctx.strokeStyle = '#334155';
-    ctx.beginPath();
-    ctx.moveTo(0, origin.y);
-    ctx.lineTo(canvas.width, origin.y);
-    ctx.moveTo(origin.x, 0);
-    ctx.lineTo(origin.x, canvas.height);
-    ctx.stroke();
-
-    // Draw Polylines
-    polylines.forEach(poly => {
-      ctx.beginPath();
-      const first = worldToScreen(poly.points[0].x, poly.points[0].y, canvas.width, canvas.height);
-      ctx.moveTo(first.x, first.y);
-      
-      for (let i = 1; i < poly.points.length; i++) {
-        const p = worldToScreen(poly.points[i].x, poly.points[i].y, canvas.width, canvas.height);
-        ctx.lineTo(p.x, p.y);
-      }
-      
-      if (poly.closed) {
-        ctx.closePath();
-      }
-
-      // Styles
-      const isSelected = poly.id === selectedId;
-      
-      if (isSelected) {
-        ctx.strokeStyle = '#fbbf24'; // Amber-400
-        ctx.lineWidth = 3;
-      } else if (poly.layer === 'BOARDS') {
-        ctx.strokeStyle = '#ef4444'; // Red-500
-        ctx.lineWidth = 1.5;
-      } else {
-        ctx.strokeStyle = '#10b981'; // Emerald-500
-        ctx.lineWidth = 1.5;
-      }
-      
-      ctx.stroke();
-      
-      // Draw Start Point for direction check
-      if (isSelected) {
-          ctx.fillStyle = '#fbbf24';
-          ctx.fillRect(first.x - 3, first.y - 3, 6, 6);
-      }
-    });
-
-  }, [polylines, zoom, pan, selectedId, worldToScreen]);
-
-  // Interaction Handlers
   const handleMouseDown = (e: React.MouseEvent) => {
     setIsDragging(true);
-    setLastMouse({ x: e.clientX, y: e.clientY });
+    setLastPos({ x: e.clientX, y: e.clientY });
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (isDragging) {
-      const dx = e.clientX - lastMouse.x;
-      const dy = e.clientY - lastMouse.y;
-      setPan(prev => ({
-        x: prev.x - dx / zoom, // Pan moves world opposite to mouse
-        y: prev.y + dy / zoom  // Y inverted
-      }));
-      setLastMouse({ x: e.clientX, y: e.clientY });
-    }
+    if (!isDragging) return;
+    const dx = e.clientX - lastPos.x;
+    const dy = e.clientY - lastPos.y;
+    setOffset(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+    setLastPos({ x: e.clientX, y: e.clientY });
   };
 
   const handleMouseUp = () => setIsDragging(false);
 
-  const handleWheel = (e: React.WheelEvent) => {
-    const scaleFactor = 1.1;
-    const newZoom = e.deltaY < 0 ? zoom * scaleFactor : zoom / scaleFactor;
-    setZoom(Math.max(0.1, Math.min(newZoom, 500)));
+  const toggleLayer = (id: string) => {
+    const updated = polylines.map(p => 
+      p.id === id ? { ...p, layer: p.layer === 'CUT' ? 'BOARDS' : 'CUT' } : p
+    );
+    onPolylinesChange(updated);
   };
-
-  const handleClick = (e: React.MouseEvent) => {
-    if (isDragging || Math.hypot(e.clientX - lastMouse.x, e.clientY - lastMouse.y) > 5) return;
-    
-    // Hit Test
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    
-    // Simple point-to-line distance check for selection
-    let foundId: string | null = null;
-    let minDist = 10; // pixels
-
-    polylines.forEach(poly => {
-      for (let i = 0; i < poly.points.length - 1; i++) {
-        const p1 = worldToScreen(poly.points[i].x, poly.points[i].y, canvas.width, canvas.height);
-        const p2 = worldToScreen(poly.points[i+1].x, poly.points[i+1].y, canvas.width, canvas.height);
-        
-        // dist from point (mx,my) to segment p1-p2
-        const l2 = (p1.x - p2.x)**2 + (p1.y - p2.y)**2;
-        if (l2 === 0) continue;
-        let t = ((mx - p1.x) * (p2.x - p1.x) + (my - p1.y) * (p2.y - p1.y)) / l2;
-        t = Math.max(0, Math.min(1, t));
-        const px = p1.x + t * (p2.x - p1.x);
-        const py = p1.y + t * (p2.y - p1.y);
-        const d = Math.hypot(mx - px, my - py);
-        
-        if (d < minDist) {
-            minDist = d;
-            foundId = poly.id;
-        }
-      }
-    });
-    
-    setSelectedId(foundId);
-  };
-
-  // Keyboard Shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() === 't' && selectedId) {
-        // Toggle Layer
-        const newPolylines = polylines.map(p => {
-            if (p.id === selectedId) {
-                return { ...p, layer: p.layer === 'BOARDS' ? 'CUT' : 'BOARDS' };
-            }
-            return p;
-        });
-        onPolylinesChange(newPolylines);
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedId, polylines, onPolylinesChange]);
 
   return (
-    <div 
-      ref={containerRef} 
-      className="w-full h-full relative cursor-crosshair overflow-hidden"
-      onMouseDown={handleMouseDown}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
-      onWheel={handleWheel}
-      onClick={handleClick}
-    >
-      <canvas ref={canvasRef} className="block" />
-      
-      {/* HUD */}
-      <div className="absolute top-4 left-4 text-xs font-mono text-slate-500 pointer-events-none select-none">
-        <div>ZOOM: {(zoom * 100).toFixed(0)}%</div>
-        <div>PAN: {pan.x.toFixed(1)}, {pan.y.toFixed(1)}</div>
-        <div className="mt-2 text-emerald-500">
-           {selectedId ? `SELECTED: ${selectedId}` : 'NO SELECTION'}
-        </div>
-        {selectedId && <div className="text-amber-500 animate-pulse">PRESS 'T' TO TOGGLE LAYER</div>}
+    <div className="relative w-full h-full bg-slate-950 overflow-hidden select-none">
+      {/* Controls */}
+      <div className="absolute top-4 right-4 flex flex-col gap-2 z-10">
+        <button onClick={() => setScale(s => s * 1.2)} className="p-2 bg-slate-800 text-slate-200 rounded hover:bg-slate-700 border border-slate-700"><ZoomIn size={20} /></button>
+        <button onClick={() => setScale(s => s / 1.2)} className="p-2 bg-slate-800 text-slate-200 rounded hover:bg-slate-700 border border-slate-700"><ZoomOut size={20} /></button>
+        <button onClick={() => window.location.reload()} className="p-2 bg-slate-800 text-slate-200 rounded hover:bg-slate-700 border border-slate-700"><Maximize size={20} /></button>
       </div>
+
+      <div 
+        ref={containerRef}
+        className="w-full h-full cursor-move"
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+      >
+        <svg className="w-full h-full pointer-events-none">
+          <g transform={`translate(${offset.x}, ${offset.y}) scale(${scale}, ${-scale})`}>
+            {/* Dibujar Polilíneas */}
+            {polylines.map((poly) => (
+              <path
+                key={poly.id}
+                d={`M ${poly.points.map(p => `${p.x},${p.y}`).join(' L ')} ${poly.closed ? 'Z' : ''}`}
+                fill={poly.layer === 'CUT' && poly.closed ? 'rgba(16, 185, 129, 0.1)' : 'transparent'}
+                stroke={selectedId === poly.id ? '#fbbf24' : (poly.layer === 'BOARDS' ? '#ef4444' : '#10b981')}
+                strokeWidth={selectedId === poly.id ? 2 / scale : 1 / scale}
+                vectorEffect="non-scaling-stroke"
+                className="pointer-events-auto cursor-pointer hover:opacity-80 transition-opacity"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedId(poly.id);
+                }}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  toggleLayer(poly.id);
+                }}
+              />
+            ))}
+
+            {/* DIBUJAR ETIQUETAS (TALLAS) */}
+            {labels && labels.map((lbl, idx) => (
+              <text
+                key={`lbl-${idx}`}
+                x={lbl.x}
+                y={lbl.y}
+                fill="#ef4444" // Rojo (BOARDS)
+                fontSize={lbl.height * 5} // Un poco más grande para verlas bien
+                textAnchor="middle"
+                alignmentBaseline="middle"
+                transform={`scale(1, -1) translate(0, ${-2 * lbl.y})`} // Corrección para que el texto no salga al revés en DXF
+                style={{ pointerEvents: 'none', userSelect: 'none' }}
+              >
+                {lbl.text}
+              </text>
+            ))}
+          </g>
+        </svg>
+      </div>
+
+      {selectedId && (
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-slate-900 border border-slate-700 px-4 py-2 rounded-full text-xs text-slate-300 shadow-xl flex items-center gap-2">
+          <MousePointer2 size={12} className="text-amber-400" />
+          Entity ID: <span className="font-mono text-emerald-400">{selectedId}</span>
+          <span className="w-px h-3 bg-slate-700 mx-2"></span>
+          Double-click to toggle layer
+        </div>
+      )}
     </div>
   );
 };
