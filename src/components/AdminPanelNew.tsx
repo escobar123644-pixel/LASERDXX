@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { 
   X, ShieldAlert, Activity, Settings, Database, FileText, 
-  Users, Cpu, Trash2, RefreshCw, Plus, Lock, 
+  Users, Cpu, Trash2, RefreshCw, Plus, Lock, Key,
   Megaphone, Radio, Layout, Download, Play, CheckCircle 
 } from 'lucide-react';
 import { 
@@ -45,6 +45,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
   const [nestingProcessing, setNestingProcessing] = useState(false);
   const [showNestingResult, setShowNestingResult] = useState(false);
 
+  // Cargar datos al abrir
   useEffect(() => {
     if (isOpen) {
         loadData();
@@ -147,6 +148,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
       onClose();
   };
 
+  const getMachineName = (id?: string) => {
+      const m = machines.find(m => m.id === id);
+      return m ? m.name : 'Sin Asignar';
+  };
+
   if (!isOpen) return null;
 
   const SidebarItem = ({ id, icon: Icon, label, alert }: any) => (
@@ -163,11 +169,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
       {alert && <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>}
     </button>
   );
-
-  const getMachineName = (id?: string) => {
-      const m = machines.find(m => m.id === id);
-      return m ? m.name : 'Sin Asignar';
-  };
 
   return (
     <div className="fixed inset-0 bg-black/90 backdrop-blur-sm z-50 flex items-center justify-center p-4 font-sans">
@@ -229,15 +230,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
         <div className="flex-1 bg-black/50 flex flex-col min-w-0">
             
             <div className="h-16 border-b border-slate-800 flex items-center justify-between px-8 bg-slate-900/50">
-                <h3 className="text-xl font-bold text-white tracking-wide">
-                    {activeTab === 'DASHBOARD' && 'PANEL DE CONTROL'}
-                    {activeTab === 'FLEET' && 'MANTENIMIENTO DE MÁQUINAS'}
-                    {activeTab === 'USERS' && 'GESTIÓN DE USUARIOS'}
-                    {activeTab === 'REPORTS' && 'REPORTES DE PRODUCCIÓN'}
-                    {activeTab === 'NESTING' && 'OPTIMIZACIÓN DE TRAZO'}
-                    {activeTab === 'CONFIG' && 'AJUSTES GLOBALES'}
-                    {activeTab === 'SECURITY' && 'BITÁCORA DE SEGURIDAD'}
-                </h3>
+                <h3 className="text-xl font-bold text-white tracking-wide">{activeTab}</h3>
                 <div className="flex items-center gap-4">
                      <button onClick={loadData} disabled={loading} className="text-slate-500 hover:text-white transition-colors">
                         <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
@@ -263,7 +256,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
                                 <div className="text-3xl font-mono text-emerald-400">{users.length}</div>
                             </div>
                             <div className="bg-slate-900 p-5 rounded border border-slate-800">
-                                <div className="text-slate-500 text-xs font-bold uppercase mb-2">Eventos Hoy</div>
+                                <div className="text-slate-500 text-xs font-bold uppercase mb-2">Logs Hoy</div>
                                 <div className="text-3xl font-mono text-amber-400">{logs.length}</div>
                             </div>
                         </div>
@@ -272,8 +265,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
                             <div className="absolute top-0 right-0 p-4 opacity-10"><Megaphone size={80} /></div>
                             <h4 className="text-xs font-bold text-emerald-400 uppercase tracking-widest mb-4 flex gap-2 items-center">📢 Sistema de Anuncios (Broadcast)</h4>
                             <div className="flex gap-2">
-                                <input value={broadcastMsg} onChange={e => setBroadcastMsg(e.target.value)} type="text" placeholder="Ej: PARADA DE PLANTA EN 5 MINUTOS..." className="flex-1 bg-black border border-slate-700 p-3 text-sm text-white rounded outline-none focus:border-emerald-500 placeholder:text-slate-600" />
-                                <button onClick={handleBroadcast} disabled={loading || !broadcastMsg} className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 font-bold text-xs rounded uppercase transition-all shadow-lg shadow-emerald-900/20">Enviar Alerta</button>
+                                <input 
+                                    value={broadcastMsg} 
+                                    onChange={e => setBroadcastMsg(e.target.value)} 
+                                    type="text" 
+                                    placeholder="Ej: PARADA DE PLANTA EN 5 MINUTOS..." 
+                                    className="flex-1 bg-black border border-slate-700 p-3 text-sm text-white rounded outline-none focus:border-emerald-500 placeholder:text-slate-600" 
+                                />
+                                <button onClick={handleBroadcast} disabled={loading || !broadcastMsg} className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 font-bold text-xs rounded uppercase transition-all shadow-lg shadow-emerald-900/20">
+                                    Enviar Alerta
+                                </button>
                             </div>
                             <p className="text-[10px] text-slate-500 mt-2">Este mensaje aparecerá instantáneamente en las pantallas de todos los operarios activos.</p>
                         </div>
@@ -332,7 +333,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
                     </div>
                 )}
 
-                {/* --- FLEET (FORMULARIO RESTAURADO) --- */}
+                {/* --- FLEET --- */}
                 {activeTab === 'FLEET' && (
                     <div className="space-y-6">
                          <div className="flex gap-2 mb-6 p-4 bg-slate-900/50 border border-slate-800 rounded">
@@ -349,8 +350,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
                         </div>
 
                         <div className="grid grid-cols-2 gap-4">
-                            {machines.length === 0 && <div className="text-slate-500 text-sm p-4">No hay máquinas registradas.</div>}
-                            
                             {machines.map(m => (
                                 <div key={m.id} className={`bg-slate-900 border p-5 rounded transition-colors ${m.status === 'OK' ? 'border-slate-800 hover:border-slate-600' : 'border-amber-900/50 hover:border-amber-500'}`}>
                                     <div className="flex justify-between items-start mb-4">
@@ -381,7 +380,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
                     </div>
                 )}
 
-                {/* --- USERS (FORMULARIO RESTAURADO) --- */}
+                {/* --- USERS --- */}
                 {activeTab === 'USERS' && (
                     <div className="space-y-6">
                         <div className="bg-slate-900 border border-slate-800 p-5 rounded">
@@ -421,6 +420,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
                                 <thead className="bg-black text-[10px] text-slate-500 font-bold uppercase tracking-wider">
                                     <tr>
                                         <th className="p-4">Usuario</th>
+                                        <th className="p-4">Clave</th>
                                         <th className="p-4">Rol</th>
                                         <th className="p-4">Máquina Asignada</th>
                                         <th className="p-4 text-right">Acciones</th>
@@ -430,6 +430,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
                                     {users.map((u: any) => (
                                         <tr key={u.username} className="hover:bg-slate-800/50">
                                             <td className="p-4 font-mono text-white">{u.username}</td>
+                                            <td className="p-4 font-mono text-amber-400">{u.password}</td>
                                             <td className="p-4"><span className="bg-slate-800 px-2 py-1 rounded text-[10px] font-bold">{u.role}</span></td>
                                             <td className="p-4 text-emerald-400 text-xs">
                                                 {u.machineId ? getMachineName(u.machineId) : <span className="text-slate-600 opacity-50">--</span>}
