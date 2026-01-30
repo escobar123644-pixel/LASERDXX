@@ -1,205 +1,249 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Upload, Download, Settings, LogOut, FileCode, Shield, Layers, Scissors, Trash2, BoxSelect } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { useDropzone } from 'react-dropzone';
+import { 
+  Upload, Download, Layers, Settings, LogOut, 
+  FileCode, Ruler, Scissors, ScanLine, User 
+} from 'lucide-react';
+import { DxfViewer } from './components/DxfViewer';
 import { Login } from './components/Login';
-import { Viewer } from './components/Viewer';
-import { AdminPanel } from './components/AdminPanelNew'; 
-import { getSession, logout, UserSession, logExport, getSettings } from './utils/auth';
-import { processDxf, generateR12, Polyline, ProcessedResult } from './utils/dxfUtils';
+import { AdminPanel } from './components/AdminPanelNew';
+import { processDxf, generateR12 } from './utils/dxfUtils';
+import { getSession, logout, getSettings, addLog, updateMachineDistance } from './utils/auth';
 
 function App() {
-  const [session, setSession] = useState<UserSession | null>(null);
+  const [session, setSession] = useState(getSession());
+  const [data, setData] = useState<any>(null);
+  const [originalContent, setOriginalContent] = useState<string | null>(null);
+  const [fileName, setFileName] = useState('');
   const [isAdminOpen, setIsAdminOpen] = useState(false);
-  const [polylines, setPolylines] = useState<Polyline[]>([]);
-  const [labels, setLabels] = useState<any[]>([]); 
-  const [stats, setStats] = useState<ProcessedResult['stats'] | null>(null);
-  const [filename, setFilename] = useState<string>('');
-  const [showMetrics, setShowMetrics] = useState(false);
-  
-  // NUEVOS ESTADOS PARA EL MODO MANUAL
-  const [dxfContent, setDxfContent] = useState<string>(''); // Guardar contenido raw
-  const [preserveFrame, setPreserveFrame] = useState(true); // Estado del checkbox
+  const [settings, setSettings] = useState(getSettings());
+  const [preserveFrame, setPreserveFrame] = useState(true);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    accept: { 'application/dxf': ['.dxf'] },
+    onDrop: (acceptedFiles) => {
+      const file = acceptedFiles[0];
+      setFileName(file.name);
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        setOriginalContent(content);
+        try {
+          const result = processDxf(content, { preserveFrame, enableLabeling: settings.enableLabeling });
+          setData(result);
+        } catch (error) {
+          alert("Error al leer DXF.");
+        }
+      };
+      reader.readAsText(file);
+    }
+  });
+
+  const handleCloseAdmin = () => {
+      setIsAdminOpen(false);
+      setSettings(getSettings()); 
+  };
 
   useEffect(() => {
-    const sess = getSession();
-    if (sess) {
-      setSession(sess);
-      const settings = getSettings();
-      setShowMetrics(sess.role === 'ADMIN' || settings.showMetricsToOperator);
+    if (originalContent) {
+      const result = processDxf(originalContent, { preserveFrame, enableLabeling: settings.enableLabeling });
+      setData(result);
     }
-  }, []);
+  }, [preserveFrame, settings.enableLabeling]);
 
-  const handleLogin = () => {
-    const sess = getSession();
-    setSession(sess);
-    const settings = getSettings();
-    setShowMetrics(sess && (sess.role === 'ADMIN' || settings.showMetricsToOperator) || false);
+  const handleToggleLayer = (index: number) => {
+      if (!data) return;
+      const newData = { ...data };
+      const poly = newData.polylines[index];
+      poly.layer = poly.layer === 'CUT' ? 'BOARDS' : 'CUT';
+      setData(newData);
   };
 
-  const handleLogout = () => {
-    logout();
-    setSession(null);
-    setPolylines([]);
-    setLabels([]); 
-    setStats(null);
-    setFilename('');
-    setDxfContent('');
-    setIsAdminOpen(false);
-  };
+  // --- EXPORTACIÓN CON NOMBRE ORIGINAL ---
+  const handleExport = async (type: 'ALL' | 'CUT' | 'BOARDS') => {
+    if (!data) return;
 
-  // Función auxiliar para procesar (se usa al cargar y al cambiar checkbox)
-  const runProcessing = (text: string, keepFrame: boolean) => {
-    try {
-        const result = processDxf(text, { preserveFrame: keepFrame });
-        setPolylines(result.polylines);
-        setLabels(result.labels || []); 
-        setStats(result.stats);
-    } catch (err) {
-        alert('Error processing DXF file.');
-        console.error(err);
+    let linesToExport = data.polylines;
+    let labelsToExport = data.labels;
+    let suffix = "";
+
+    if (type === 'CUT') {
+      linesToExport = data.polylines.filter((p: any) => p.layer === 'CUT');
+      labelsToExport = [];
+      suffix = "_CUT_ONLY";
+    } else if (type === 'BOARDS') {
+      linesToExport = data.polylines.filter((p: any) => p.layer === 'BOARDS');
+      suffix = "_INTERNAL_ONLY";
+    } else {
+      suffix = "_FULL";
     }
-  };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setFilename(file.name.replace(/\.dxf$/i, ''));
-    
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const text = event.target?.result as string;
-      setDxfContent(text); // Guardamos el contenido crudo
-      runProcessing(text, preserveFrame); // Procesamos con la opción actual
-    };
-    reader.readAsText(file);
-    e.target.value = '';
-  };
-
-  // Manejador del checkbox
-  const togglePreserveFrame = () => {
-      const newValue = !preserveFrame;
-      setPreserveFrame(newValue);
-      if (dxfContent) {
-          runProcessing(dxfContent, newValue); // Re-procesar al instante
-      }
-  };
-
-  const handleExport = () => {
-    if (polylines.length === 0) return;
-    const output = generateR12(polylines, labels);
-    const blob = new Blob([output], { type: 'application/dxf' });
+    const r12 = generateR12(linesToExport, labelsToExport);
+    const blob = new Blob([r12], { type: 'application/dxf' });
     const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `SUMMA_READY_${filename || 'export'}.dxf`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    if (stats) logExport(filename, stats.materialHeightYards, stats.materialWidthYards);
+    const a = document.createElement('a');
+    a.href = url;
+    
+    // AQUÍ ESTÁ EL CAMBIO: Usar el nombre original
+    // Quitamos la extensión .dxf original para no duplicarla (ej: archivo.dxf_FULL.dxf)
+    const baseName = fileName.replace(/\.dxf$/i, '') || 'LASERDXX';
+    a.download = `${baseName}${suffix}.dxf`;
+    
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    
+    if (session) {
+        const yards = data.stats.materialWidthYards.toFixed(2);
+        await addLog('EXPORT', `Exportado ${type}: ${a.download} (${yards} yd)`, session.username);
+        if (session.machineId) {
+            await updateMachineDistance(session.machineId, data.stats.materialWidthYards);
+        }
+    }
   };
 
-  if (!session) {
-    return <Login onLogin={handleLogin} />;
-  }
+  const handleLogout = () => { logout(); setSession(null); setData(null); };
+
+  if (!session) return <Login onLogin={() => setSession(getSession())} />;
 
   return (
-    <div className="h-screen flex flex-col bg-slate-950 text-slate-300 overflow-hidden font-sans">
-      <header className="h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-6 shrink-0 z-30 relative shadow-md">
-        <div className="flex items-center gap-4">
-          <div className="bg-slate-800 p-2 rounded text-emerald-500">
-            <Shield size={24} />
+    <div className="flex h-screen bg-slate-950 text-slate-200 font-sans overflow-hidden selection:bg-emerald-500/30">
+      
+      {/* BARRA LATERAL */}
+      <aside className="w-80 flex flex-col border-r border-slate-800 bg-slate-900/50 backdrop-blur-md z-20 shadow-2xl">
+        
+        <div className="p-5 border-b border-slate-800 flex items-center gap-3 bg-slate-900">
+          <div className="w-8 h-8 bg-emerald-600 rounded flex items-center justify-center shadow-lg shadow-emerald-500/20">
+            <ScanLine size={18} className="text-white" />
           </div>
           <div>
-            <h1 className="font-bold text-lg tracking-wider text-slate-100">DXF PRO <span className="text-emerald-500">//</span> SMART TERMINAL</h1>
-            <div className="flex items-center gap-2 text-[10px] uppercase font-mono text-slate-500">
-              <span className={`w-2 h-2 rounded-full ${session ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`}></span>
-              CONNECTED AS {session.username}
+            <h1 className="font-bold text-white tracking-wider text-sm">LASERDXX PRO</h1>
+            <div className="flex items-center gap-1.5 mt-0.5">
+              <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></span>
+              <span className="text-[10px] text-emerald-500 font-mono">SYSTEM ONLINE</span>
             </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
-          <input type="file" accept=".dxf" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
-          <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded-sm border border-slate-700 transition-all text-sm font-medium">
-            <Upload size={18} /> LOAD DXF
-          </button>
-          <button onClick={handleExport} disabled={polylines.length === 0} className={`flex items-center gap-2 px-4 py-2 rounded-sm border transition-all text-sm font-bold tracking-wide ${polylines.length > 0 ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.4)]' : 'bg-slate-800 text-slate-600 border-slate-800 cursor-not-allowed'}`}>
-            <Download size={18} /> EXPORT R12
-          </button>
-          <div className="w-px h-8 bg-slate-800 mx-2"></div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-6 custom-scrollbar">
+          
+          <div {...getRootProps()} className={`
+            border-2 border-dashed rounded-xl p-6 text-center transition-all cursor-pointer relative overflow-hidden group
+            ${isDragActive ? 'border-emerald-500 bg-emerald-500/10' : 'border-slate-700 hover:border-slate-500 hover:bg-slate-800/50'}
+          `}>
+            <input {...getInputProps()} />
+            <div className="relative z-10 flex flex-col items-center gap-2">
+              <div className="p-3 bg-slate-800 rounded-full group-hover:scale-110 transition-transform">
+                <Upload size={20} className={isDragActive ? 'text-emerald-400' : 'text-slate-400'} />
+              </div>
+              <p className="text-xs font-bold text-slate-300 uppercase tracking-wide">
+                {isDragActive ? 'SOLTAR AHORA' : 'CARGAR DXF'}
+              </p>
+            </div>
+          </div>
+
+          {data && (
+            <div className="animate-in fade-in slide-in-from-left-4 duration-500 space-y-6">
+              
+              <div className="flex items-center gap-2 text-xs text-slate-400 bg-slate-900/50 p-2 rounded border border-slate-800">
+                <FileCode size={14} />
+                <span className="truncate flex-1 font-mono">{fileName}</span>
+              </div>
+
+              <div className="bg-slate-800/80 p-5 rounded-lg border border-emerald-500/20 shadow-lg shadow-emerald-900/10 relative overflow-hidden">
+                <div className="absolute top-0 right-0 p-2 opacity-10"><Ruler size={60}/></div>
+                <div className="flex items-center gap-2 text-emerald-400 mb-2">
+                  <Ruler size={16} />
+                  <span className="text-xs font-bold uppercase tracking-widest">Consumo (Largo)</span>
+                </div>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-4xl font-black text-white font-mono tracking-tight">
+                    {data.stats.materialWidthYards.toFixed(2)}
+                  </span>
+                  <span className="text-sm font-medium text-slate-400">yardas</span>
+                </div>
+                <div className="mt-2 pt-2 border-t border-slate-700/50 flex justify-between items-center text-[10px] text-slate-500">
+                   <span>Alto (Ancho tela):</span>
+                   <span className="font-mono text-slate-300">{data.stats.materialHeightYards.toFixed(2)} yd</span>
+                </div>
+              </div>
+
+              <div className="bg-slate-900/80 border border-slate-700 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-3 text-emerald-500">
+                  <Layers size={14} />
+                  <span className="text-[10px] font-bold uppercase tracking-widest">Lógica</span>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer w-full justify-between group">
+                  <span className="text-xs font-medium text-slate-300 group-hover:text-white transition-colors">Detectar Marco</span>
+                  <div className="relative">
+                    <input type="checkbox" className="sr-only peer" checked={preserveFrame} onChange={(e) => setPreserveFrame(e.target.checked)} />
+                    <div className="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500 shadow-inner"></div>
+                  </div>
+                </label>
+              </div>
+
+              <div className="space-y-2 pt-2 border-t border-slate-800">
+                <button onClick={() => handleExport('ALL')} className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 px-4 rounded-lg flex items-center justify-center gap-2 transition-all shadow-lg shadow-emerald-900/20 group text-sm">
+                  <Download size={18} className="group-hover:-translate-y-0.5 transition-transform" />
+                  EXPORTAR TODO
+                </button>
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={() => handleExport('CUT')} className="bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-emerald-500/50 text-emerald-400 font-bold py-2 px-2 rounded-lg flex items-center justify-center gap-2 transition-all text-[10px] uppercase">
+                    <Scissors size={14} /> Solo Corte
+                  </button>
+                  <button onClick={() => handleExport('BOARDS')} className="bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-red-500/50 text-red-400 font-bold py-2 px-2 rounded-lg flex items-center justify-center gap-2 transition-all text-[10px] uppercase">
+                    <ScanLine size={14} /> Internos
+                  </button>
+                </div>
+              </div>
+
+            </div>
+          )}
+        </div>
+
+        {/* FOOTER */}
+        <div className="p-4 border-t border-slate-800 bg-slate-950">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 opacity-70 hover:opacity-100 transition-opacity">
+              <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-slate-400">
+                <User size={16} />
+              </div>
+              <div className="flex flex-col">
+                <span className="text-xs font-bold text-white uppercase">{session.username}</span>
+                <span className="text-[10px] text-slate-500">{session.role}</span>
+              </div>
+            </div>
+            <button onClick={handleLogout} className="text-slate-500 hover:text-red-400 transition-colors p-2" title="Salir">
+              <LogOut size={18} />
+            </button>
+          </div>
           {session.role === 'ADMIN' && (
-            <button onClick={() => setIsAdminOpen(true)} className="p-2 text-slate-400 hover:text-emerald-400 transition-colors" title="Admin Settings">
-              <Settings size={20} />
+            <button onClick={() => setIsAdminOpen(true)} className="w-full mt-3 text-[10px] flex items-center justify-center gap-2 text-slate-500 hover:text-white bg-slate-900 border border-slate-800 hover:border-slate-600 py-1.5 rounded transition-all">
+              <Settings size={12} /> PANEL ADMINISTRADOR
             </button>
           )}
-          <button onClick={handleLogout} className="p-2 text-slate-400 hover:text-red-400 transition-colors" title="Logout">
-            <LogOut size={20} />
-          </button>
         </div>
-      </header>
+      </aside>
 
-      <div className="flex-1 flex overflow-hidden relative">
-        <aside className="w-80 bg-slate-900 border-r border-slate-800 flex flex-col z-20 shadow-xl">
-          
-          {/* SECCIÓN NUEVA: PROCESSING OPTIONS */}
-          <div className="p-6 border-b border-slate-800">
-             <h2 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
-                <Settings size={14} /> Processing Options
-             </h2>
-             <div className="bg-slate-950 p-3 rounded border border-slate-800">
-                <label className="flex items-center gap-3 cursor-pointer group">
-                    <div className={`w-5 h-5 border rounded flex items-center justify-center transition-colors ${preserveFrame ? 'bg-emerald-600 border-emerald-500' : 'border-slate-600 bg-slate-900'}`}>
-                        {preserveFrame && <div className="w-2.5 h-2.5 bg-white rounded-sm"></div>}
-                    </div>
-                    <input type="checkbox" checked={preserveFrame} onChange={togglePreserveFrame} className="hidden" />
-                    <div>
-                        <div className="text-sm font-bold text-slate-200 group-hover:text-white transition-colors">Preserve Frame & Dividers</div>
-                        <div className="text-[10px] text-slate-500">Uncheck if frame is detected wrong</div>
-                    </div>
-                </label>
-             </div>
-          </div>
+      {/* VISOR */}
+      <main className="flex-1 flex flex-col relative bg-black">
+        <div className="flex-1 overflow-hidden relative">
+          {data ? (
+            <DxfViewer 
+                data={data} 
+                containerHeight="100%" 
+                onToggleLayer={handleToggleLayer}
+            />
+          ) : (
+            <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-700 opacity-20 pointer-events-none select-none">
+                <ScanLine size={120} strokeWidth={1} />
+                <h2 className="text-4xl font-black mt-4 tracking-tighter">NO SIGNAL</h2>
+            </div>
+          )}
+        </div>
+      </main>
 
-          <div className="p-6 border-b border-slate-800">
-            <h2 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">File Statistics</h2>
-            {stats ? (
-              <div className="space-y-4 font-mono text-sm">
-                 <div className="flex justify-between items-center text-slate-400"><span className="flex items-center gap-2"><FileCode size={14} /> Entities</span><span className="text-slate-200">{stats.originalCount}</span></div>
-                 <div className="flex justify-between items-center text-emerald-400"><span className="flex items-center gap-2"><Scissors size={14} /> Healed</span><span className="font-bold">{stats.healedCount}</span></div>
-                 <div className="flex justify-between items-center text-amber-500"><span className="flex items-center gap-2"><Trash2 size={14} /> Debris</span><span>{stats.debrisRemoved}</span></div>
-                 {showMetrics && (
-                   <div className="mt-6 pt-4 border-t border-slate-800 space-y-3">
-                     <div><div className="text-xs text-slate-500 mb-1">CONSUMPTION (Y-AXIS)</div><div className="text-2xl font-bold text-slate-100">{stats.materialHeightYards.toFixed(2)} <span className="text-sm font-normal text-slate-500">Yds</span></div></div>
-                     <div><div className="text-xs text-slate-500 mb-1">CONSUMPTION (X-AXIS)</div><div className="text-2xl font-bold text-slate-100">{stats.materialWidthYards.toFixed(2)} <span className="text-sm font-normal text-slate-500">Yds</span></div></div>
-                   </div>
-                 )}
-              </div>
-            ) : (
-              <div className="text-slate-600 text-sm italic py-4 text-center border border-dashed border-slate-800 rounded">No file loaded.</div>
-            )}
-          </div>
-          <div className="p-6 flex-1 overflow-y-auto">
-             <h2 className="text-xs font-bold text-slate-500 uppercase tracking-widest mb-4">Layer Legend</h2>
-             <div className="space-y-3 font-mono text-xs">
-                <div className="flex items-center gap-3"><div className="w-4 h-4 border border-emerald-500 bg-emerald-500/10"></div><div><div className="text-emerald-500 font-bold">CUT</div><div className="text-slate-500">Outer Contours</div></div></div>
-                <div className="flex items-center gap-3"><div className="w-4 h-4 border border-red-500 bg-red-500/10"></div><div><div className="text-red-500 font-bold">BOARDS</div><div className="text-slate-500">Internal Holes</div></div></div>
-             </div>
-          </div>
-        </aside>
-
-        <main className="flex-1 relative bg-slate-950">
-           {polylines.length > 0 ? (
-             <Viewer polylines={polylines} onPolylinesChange={setPolylines} />
-           ) : (
-             <div className="absolute inset-0 flex items-center justify-center text-slate-700">
-                <div className="text-center"><Upload size={48} className="mx-auto mb-4 opacity-50" /><p className="text-lg font-medium">Ready for input</p></div>
-             </div>
-           )}
-        </main>
-      </div>
-      <AdminPanel isOpen={isAdminOpen} onClose={() => setIsAdminOpen(false)} />
+      <AdminPanel isOpen={isAdminOpen} onClose={handleCloseAdmin} />
     </div>
   );
 }

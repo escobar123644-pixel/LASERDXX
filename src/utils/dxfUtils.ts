@@ -19,22 +19,19 @@ export interface ProcessedResult {
   };
 }
 
-// --- Options Interface ---
 export interface ProcessOptions {
     preserveFrame: boolean;
+    enableLabeling: boolean; // <--- Nuevo
 }
 
-// --- Constants ---
 const HEAL_TOLERANCE = 0.05;
 const MIN_ENTITY_LENGTH = 3.0;
 const GERBER_MIN_LENGTH = 0.5;
 const TEXT_SIZE = 2.5; 
 const TEXT_OFFSET = 0.5;
 const YARDS_DIVISOR = 36.0;
-
 const SIZE_REGEX = /\b(XS|S|M|L|XL|2XL|3XL|YXS|YS|YM|YL|YXL|Y2XL|Y3XL|XSR|YSR|YMR|YLR|YXLR|Y2XLR)\b/i;
 
-// --- Helper Functions ---
 const distance = (p1: Point, p2: Point) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
 
 const isCollinear = (p1: Point, p2: Point, p3: Point) => {
@@ -49,6 +46,14 @@ const getPolylineLength = (points: Point[], closed: boolean): number => {
   return len;
 };
 
+const calculatePolygonArea = (points: Point[]): number => {
+    let area = 0;
+    for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+        area += (points[j].x + points[i].x) * (points[j].y - points[i].y);
+    }
+    return Math.abs(area / 2);
+};
+
 const getPolylineBounds = (points: Point[]) => {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   points.forEach(p => {
@@ -59,36 +64,36 @@ const getPolylineBounds = (points: Point[]) => {
 };
 
 const isPointInPolygon = (p: Point, polygon: Point[]) => {
-  let wn = 0;
-  for (let i = 0; i < polygon.length - 1; i++) {
-    const p1 = polygon[i]; const p2 = polygon[i + 1];
-    if (p1.y <= p.y) { if (p2.y > p.y && (p2.x - p1.x) * (p.y - p1.y) - (p2.y - p1.y) * (p.x - p1.x) > 0) wn++; } 
-    else { if (p2.y <= p.y && (p2.x - p1.x) * (p.y - p1.y) - (p2.y - p1.y) * (p.x - p1.x) < 0) wn--; }
+  let inside = false;
+  const x = p.x, y = p.y;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i].x, yi = polygon[i].y;
+      const xj = polygon[j].x, yj = polygon[j].y;
+      const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
   }
-  return wn !== 0;
+  return inside;
 };
 
-// --- Core Logic ---
+const isPolyInsidePoly = (inner: Polyline, outer: Polyline): boolean => {
+    const bIn = inner.bbox!; const bOut = outer.bbox!;
+    if (bIn.minX < bOut.minX || bIn.maxX > bOut.maxX || bIn.minY < bOut.minY || bIn.maxY > bOut.maxY) return false;
+    return isPointInPolygon(inner.points[0], outer.points);
+};
 
 const extractData = (dxf: any) => {
   const polylines: Polyline[] = [];
   const rawTexts: {x:number, y:number, text:string}[] = [];
-
   if (!dxf || !dxf.entities) return { polylines, rawTexts };
-
   dxf.entities.forEach((entity: any) => {
     if (entity.type === 'TEXT' || entity.type === 'MTEXT') {
         const content = (entity.text || '').trim();
         const match = content.match(SIZE_REGEX);
-        if (match) {
-            rawTexts.push({ x: entity.startPoint.x, y: entity.startPoint.y, text: match[0].toUpperCase() });
-        }
+        if (match) rawTexts.push({ x: entity.startPoint.x, y: entity.startPoint.y, text: match[0].toUpperCase() });
         return; 
     }
-
     let points: Point[] = [];
     let closed = false;
-
     if (entity.type === 'LINE') {
       points = [{ x: entity.vertices[0].x, y: entity.vertices[0].y }, { x: entity.vertices[1].x, y: entity.vertices[1].y }];
     } else if (entity.type === 'LWPOLYLINE' || entity.type === 'POLYLINE') {
@@ -96,10 +101,7 @@ const extractData = (dxf: any) => {
       closed = entity.shape === true || (entity.vertices.length > 2 && distance(points[0], points[points.length - 1]) < 0.001);
       if (closed && points.length > 0 && distance(points[0], points[points.length - 1]) > 0.001) points.push({ ...points[0] });
     }
-
-    if (points.length > 0) {
-      polylines.push({ points, closed, id: Math.random().toString(36).substr(2, 9), originalLayer: entity.layer });
-    }
+    if (points.length > 0) polylines.push({ points, closed, id: Math.random().toString(36).substr(2, 9), originalLayer: entity.layer });
   });
   return { polylines, rawTexts };
 };
@@ -167,10 +169,7 @@ const detectFrame = (polylines: Polyline[]): string | null => {
     if (!poly.closed) return;
     const bounds = getPolylineBounds(poly.points);
     const area = bounds.width * bounds.height;
-    if (area > maxArea && bounds.width > 50) { 
-      maxArea = area;
-      frameId = poly.id;
-    }
+    if (area > maxArea && bounds.width > 50) { maxArea = area; frameId = poly.id; }
   });
   if (frameId) {
       const frame = polylines.find(p => p.id === frameId);
@@ -180,95 +179,90 @@ const detectFrame = (polylines: Polyline[]): string | null => {
   return frameId;
 };
 
-// --- ASIGNACIÓN DE CAPAS BLINDADA ---
+interface TreeNode { poly: Polyline; children: TreeNode[]; }
+
 const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[] => {
-  return polylines.map((poly, i) => {
-    // 1. Marco siempre ROJO
-    if (frameId && poly.id === frameId) return { ...poly, layer: 'BOARDS' };
-
-    // 2. Líneas abiertas (escombros/piquetes) SIEMPRE ROJAS
-    if (!poly.closed) {
-        return { ...poly, layer: 'BOARDS' };
-    }
-
-    // 3. Contornos cerrados: Lógica par/impar
-    const testPoint = poly.points[0];
-    let nestingLevel = 0;
-    
-    for (let j = 0; j < polylines.length; j++) {
-      if (i === j) continue;
-      if (!polylines[j].closed) continue;
-      if (frameId && polylines[j].id === frameId) continue;
-      
-      if (isPointInPolygon(testPoint, polylines[j].points)) {
-        nestingLevel++;
-      }
-    }
-    
-    const layer = nestingLevel % 2 !== 0 ? 'BOARDS' : 'CUT';
-    return { ...poly, layer };
-  });
+    const enrichedPolylines = polylines.map(p => ({
+        ...p,
+        bbox: getPolylineBounds(p.points),
+        area: p.closed ? calculatePolygonArea(p.points) : 0
+    }));
+    const result: Polyline[] = [];
+    const frame = enrichedPolylines.find(p => p.id === frameId);
+    if (frame) result.push({ ...frame, layer: 'BOARDS' }); 
+    const openLines = enrichedPolylines.filter(p => !p.closed && p.id !== frameId).map(p => ({ ...p, layer: 'BOARDS' }));
+    result.push(...openLines);
+    const closedLines = enrichedPolylines.filter(p => p.closed && p.id !== frameId);
+    closedLines.sort((a, b) => b.area! - a.area!);
+    const roots: TreeNode[] = [];
+    const insertIntoTree = (node: TreeNode, siblings: TreeNode[]): boolean => {
+        for (const sibling of siblings) {
+            if (isPolyInsidePoly(node.poly, sibling.poly)) {
+                if (!insertIntoTree(node, sibling.children)) sibling.children.push(node);
+                return true; 
+            }
+        }
+        return false;
+    };
+    closedLines.forEach(poly => {
+        const node: TreeNode = { poly, children: [] };
+        if (!insertIntoTree(node, roots)) roots.push(node);
+    });
+    const traverseAndColor = (nodes: TreeNode[], depth: number) => {
+        nodes.forEach(node => {
+            const layer = depth % 2 === 0 ? 'CUT' : 'BOARDS';
+            result.push({ ...node.poly, layer });
+            traverseAndColor(node.children, depth + 1);
+        });
+    };
+    traverseAndColor(roots, 0);
+    return result;
 };
 
-// --- ETIQUETADO ---
 const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number, text:string}[]): TextEntity[] => {
     const dividers: number[] = [];
     polylines.forEach(p => {
-        const bounds = getPolylineBounds(p.points);
-        if (bounds.height > 40 && bounds.width < 0.5) dividers.push(bounds.minX);
+        if (!p.bbox) p.bbox = getPolylineBounds(p.points);
+        if (p.bbox.height > 40 && p.bbox.width < 0.5) dividers.push(p.bbox.minX);
     });
-    
     dividers.sort((a, b) => a - b);
     let globalMinX = Infinity, globalMaxX = -Infinity;
     polylines.forEach(p => {
-        if (!p.bbox) p.bbox = getPolylineBounds(p.points);
-        if (p.bbox.minX < globalMinX) globalMinX = p.bbox.minX;
-        if (p.bbox.maxX > globalMaxX) globalMaxX = p.bbox.maxX;
+        const b = p.bbox || getPolylineBounds(p.points);
+        if (b.minX < globalMinX) globalMinX = b.minX;
+        if (b.maxX > globalMaxX) globalMaxX = b.maxX;
     });
-
     const zones = [globalMinX, ...dividers, globalMaxX];
     const finalLabels: TextEntity[] = [];
-
     for (let i = 0; i < zones.length - 1; i++) {
-        const startX = zones[i];
-        const endX = zones[i+1];
+        const startX = zones[i]; const endX = zones[i+1];
         if ((endX - startX) < 2) continue;
-
         const textInZone = rawTexts.find(t => t.x >= startX && t.x <= endX);
         if (textInZone) {
             const sizeLabel = textInZone.text;
             let largestPiece: Polyline | null = null;
             let maxArea = 0;
-
             const piecesInZone = polylines.filter(p => {
                 const pb = p.bbox!;
                 const centerX = (pb.minX + pb.maxX) / 2;
                 return p.closed && p.layer === 'CUT' && centerX >= startX && centerX <= endX;
             });
-
             piecesInZone.forEach(p => {
                 const pb = p.bbox!;
                 const area = pb.width * pb.height;
                 if (area > maxArea) { maxArea = area; largestPiece = p; }
             });
-
             if (largestPiece) {
                 const pb = largestPiece!.bbox!;
-                finalLabels.push({
-                    x: (pb.minX + pb.maxX) / 2,
-                    y: pb.maxY + TEXT_OFFSET,   
-                    text: sizeLabel,
-                    layer: 'BOARDS',
-                    height: TEXT_SIZE
-                });
+                finalLabels.push({ x: (pb.minX + pb.maxX) / 2, y: pb.maxY + TEXT_OFFSET, text: sizeLabel, layer: 'BOARDS', height: TEXT_SIZE });
             }
         }
     }
     return finalLabels;
 };
 
-// PROCESO PRINCIPAL
-export const processDxf = (dxfString: string, options = { preserveFrame: true }): ProcessedResult => {
+// FUNCIÓN PRINCIPAL
+export const processDxf = (dxfString: string, options: ProcessOptions = { preserveFrame: true, enableLabeling: true }): ProcessedResult => {
   const isGerber = dxfString.includes("Gerber Technology");
   const parser = new DxfParser();
   let dxf;
@@ -284,13 +278,12 @@ export const processDxf = (dxfString: string, options = { preserveFrame: true })
   processed = filterDebris(processed, isGerber);
   const debrisRemoved = healedCount - processed.length;
   
-  // Opción Manual
   const frameId = options.preserveFrame ? detectFrame(processed) : null;
-  
   processed = assignLayers(processed, frameId);
   
   let finalLabels: TextEntity[] = [];
-  if (isGerber && rawTexts.length > 0) {
+  // FILTRO DE ETIQUETAS
+  if (options.enableLabeling && isGerber && rawTexts.length > 0) {
       finalLabels = groupLabelsByZones(processed, rawTexts);
   }
 
@@ -323,9 +316,7 @@ export const generateR12 = (polylines: Polyline[], labels: TextEntity[] = []): s
     if (a.layer !== 'BOARDS' && b.layer === 'BOARDS') return 1;
     return 0;
   });
-
   let output = `  0\nSECTION\n  2\nHEADER\n  0\nENDSEC\n  0\nSECTION\n  2\nTABLES\n  0\nENDSEC\n  0\nSECTION\n  2\nENTITIES\n`;
-
   sorted.forEach(poly => {
     const layerName = poly.layer || 'CUT';
     const color = layerName === 'BOARDS' ? 1 : 3; 
@@ -333,23 +324,14 @@ export const generateR12 = (polylines: Polyline[], labels: TextEntity[] = []): s
     poly.points.forEach(p => output += `  0\nVERTEX\n  8\n${layerName}\n 10\n${p.x.toFixed(6)}\n 20\n${p.y.toFixed(6)}\n 30\n0\n`);
     output += `  0\nSEQEND\n`;
   });
-
   if (labels && labels.length > 0) {
       labels.forEach(lbl => {
-          output += `  0\nTEXT\n`;
-          output += `  8\nBOARDS\n`; 
-          output += ` 62\n1\n`;       
-          output += ` 10\n${lbl.x.toFixed(6)}\n`;
-          output += ` 20\n${lbl.y.toFixed(6)}\n`;
-          output += ` 30\n0.0\n`;
-          output += ` 40\n${lbl.height.toFixed(6)}\n`;
-          output += `  1\n${lbl.text}\n`;
-          output += ` 72\n4\n`; 
-          output += ` 11\n${lbl.x.toFixed(6)}\n`; 
-          output += ` 21\n${lbl.y.toFixed(6)}\n`; 
+          output += `  0\nTEXT\n`; output += `  8\nBOARDS\n`; output += ` 62\n1\n`;       
+          output += ` 10\n${lbl.x.toFixed(6)}\n`; output += ` 20\n${lbl.y.toFixed(6)}\n`; output += ` 30\n0.0\n`;
+          output += ` 40\n${lbl.height.toFixed(6)}\n`; output += `  1\n${lbl.text}\n`;
+          output += ` 72\n4\n`; output += ` 11\n${lbl.x.toFixed(6)}\n`; output += ` 21\n${lbl.y.toFixed(6)}\n`; 
       });
   }
-
   output += `  0\nENDSEC\n  0\nEOF\n`;
   return output;
 };
