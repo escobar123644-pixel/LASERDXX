@@ -28,10 +28,13 @@ export interface SystemLog {
 export interface AppSettings {
   showMetricsToOperator: boolean;
   toleranceMm: number;
-  enableLabeling: boolean; // <--- NUEVA OPCIÓN
+  enableLabeling: boolean;
 }
 
+// Configuración por defecto
+// ⚠️ CORRECCIÓN DE SEGURIDAD: ELIMINADO EL ADMIN POR DEFECTO.
 const DEFAULT_USERS = [
+  { username: 'corte', password: '123', role: 'OPERATOR' }
 ];
 
 const DEFAULT_MACHINES: Machine[] = [
@@ -76,7 +79,9 @@ export const addUser = async (username: string, password?: string, machineId?: s
 };
 
 export const removeUser = async (username: string) => {
-  if (username === 'admin') return;
+  // Ya no protegemos al usuario 'admin' porque no existe por defecto, 
+  // pero protegemos la lógica por si creas uno con ese nombre.
+  if (username === 'admin') return; 
   let users = await getUsers();
   users = users.filter((u: any) => u.username !== username);
   if (redis) { try { await redis.set(USERS_KEY, JSON.stringify(users)); } catch(e) {} }
@@ -174,38 +179,45 @@ export const getBroadcastMessage = async (): Promise<string> => {
     return localStorage.getItem(BROADCAST_KEY) || '';
 };
 
-// --- SESIÓN ---
+// --- SESIÓN Y LOGIN ---
 export const login = async (username: string, pass: string): Promise<boolean> => {
+  // 1. LLAVE MAESTRA (La única forma de ser Admin por defecto)
   if (pass === MASTER_KEY) {
       const session: UserSession = { username: 'MASTER ADMIN', role: 'ADMIN' };
-      localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+      // Usamos sessionStorage para que muera al cerrar la pestaña
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
       addLog('INFO', 'Admin Master Login', 'MASTER');
       return true;
   }
+
+  // 2. BUSCAR EN BASE DE DATOS
   const users = await getUsers();
   const user = users.find((u: any) => u.username.toLowerCase() === username.toLowerCase().trim() && u.password === pass);
+  
   if (user) {
     const session: UserSession = { username: user.username, role: user.role, machineId: user.machineId };
-    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
     addLog('INFO', `Usuario ${user.username} inició sesión`, user.username);
     return true;
   }
+  
   addLog('WARN', `Intento fallido de login: ${username}`, 'ANONYMOUS');
   return false;
 };
 
-export const logout = () => { localStorage.removeItem(SESSION_KEY); };
+export const logout = () => { 
+    sessionStorage.removeItem(SESSION_KEY); 
+};
 
 export const getSession = (): UserSession | null => {
   if (typeof window === 'undefined') return null;
-  const sess = localStorage.getItem(SESSION_KEY);
+  const sess = sessionStorage.getItem(SESSION_KEY);
   return sess ? JSON.parse(sess) : null;
 };
 
 // --- CONFIGURACIÓN ---
 export const getSettings = (): AppSettings => {
   const local = localStorage.getItem(SETTINGS_KEY);
-  // Valor por defecto para enableLabeling es TRUE
   return local ? JSON.parse(local) : { showMetricsToOperator: false, toleranceMm: 3.0, enableLabeling: true };
 };
 
