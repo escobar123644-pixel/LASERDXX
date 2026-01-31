@@ -32,8 +32,6 @@ export interface AppSettings {
 }
 
 const DEFAULT_USERS = [
-  { username: 'admin', password: '123', role: 'ADMIN' },
-  { username: 'corte', password: '123', role: 'OPERATOR' }
 ];
 
 const DEFAULT_MACHINES: Machine[] = [

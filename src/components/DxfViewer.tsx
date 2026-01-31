@@ -1,9 +1,8 @@
-import React, { useMemo, useState, useEffect, useRef } from 'react';
-import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
-import { ZoomIn, ZoomOut, Maximize, MousePointer2, AlertTriangle, Ruler } from 'lucide-react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
+import { Ruler, AlertTriangle, MousePointer2 } from 'lucide-react';
 
 interface Point { x: number; y: number; }
-interface Polyline { points: Point[]; closed: boolean; layer?: string; id?: string; }
+interface Polyline { points: Point[]; closed: boolean; layer?: string; }
 interface TextEntity { x: number; y: number; text: string; layer: string; height: number; }
 
 interface DxfViewerProps {
@@ -21,109 +20,265 @@ interface DxfViewerProps {
 }
 
 export const DxfViewer: React.FC<DxfViewerProps> = ({ data, onToggleLayer }) => {
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  
+  // Estado para disparar re-render
+  const [camera, setCamera] = useState({ x: 0, y: 0, zoom: 1 });
+  
+  // Referencia para cálculos en tiempo real (evita stale closures)
+  const cameraRef = useRef({ x: 0, y: 0, zoom: 1 });
 
-  // Escuchar Tecla A
+  const [isDragging, setIsDragging] = useState(false);
+  const [lastMouse, setLastMouse] = useState({ x: 0, y: 0 });
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+
+  // Sincronizador Estado <-> Ref
+  const updateCamera = (newCam: { x: number; y: number; zoom: number }) => {
+      setCamera(newCam);
+      cameraRef.current = newCam;
+  };
+
+  // 1. Inicializar cámara (Centrar dibujo)
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.key === 'a' || e.key === 'A') && hoveredIndex !== null && onToggleLayer) {
-        onToggleLayer(hoveredIndex);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [hoveredIndex, onToggleLayer]);
-
-  const renderData = useMemo(() => {
-    if (!data || !data.stats || !data.stats.bounds) return null;
-    let { minX, minY, maxX, maxY } = data.stats.bounds;
+    if (!data?.stats?.bounds || !containerRef.current) return;
+    const { minX, minY, maxX, maxY } = data.stats.bounds;
+    const containerW = containerRef.current.clientWidth;
+    const containerH = containerRef.current.clientHeight;
     
-    if (!Number.isFinite(minX) || !Number.isFinite(maxX)) { minX = 0; maxX = 100; }
-    if (!Number.isFinite(minY) || !Number.isFinite(maxY)) { minY = 0; maxY = 100; }
+    const dataW = maxX - minX || 100;
+    const dataH = maxY - minY || 100;
 
-    let width = maxX - minX;
-    let height = maxY - minY;
-    if (width <= 0) width = 100;
-    if (height <= 0) height = 100;
+    const zoomX = (containerW * 0.9) / dataW;
+    const zoomY = (containerH * 0.9) / dataH;
+    const startZoom = Math.min(zoomX, zoomY);
 
-    const padding = Math.max(width, height) * 0.05;
-    const viewBox = `${minX - padding} ${minY - padding} ${width + padding * 2} ${height + padding * 2}`;
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+    
+    const startX = (containerW / 2) - (centerX * startZoom);
+    const startY = (containerH / 2) - (centerY * -startZoom); 
 
-    return { viewBox, valid: true };
+    updateCamera({ x: startX, y: startY, zoom: startZoom });
   }, [data]);
 
-  if (!renderData || !renderData.valid) return <div className="text-red-500 flex items-center justify-center h-full"><AlertTriangle /> Error</div>;
+  // 2. 🛑 MANEJO DE ZOOM (Nativo para evitar error Passive) 🛑
+  useEffect(() => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+
+      const handleNativeWheel = (e: WheelEvent) => {
+          // ESTO ES LO QUE ARREGLA EL ERROR
+          e.preventDefault(); 
+          
+          const currentCam = cameraRef.current;
+          const scaleFactor = 1.1;
+          const direction = e.deltaY > 0 ? 1 / scaleFactor : scaleFactor;
+          
+          const rect = canvas.getBoundingClientRect();
+          const mouseX = e.clientX - rect.left;
+          const mouseY = e.clientY - rect.top;
+
+          let newZoom = currentCam.zoom * direction;
+          if (newZoom < 0.001) newZoom = 0.001;
+          if (newZoom > 500) newZoom = 500;
+
+          // Zoom hacia el mouse
+          const newX = mouseX - (mouseX - currentCam.x) * direction;
+          const newY = mouseY - (mouseY - currentCam.y) * direction;
+
+          updateCamera({ x: newX, y: newY, zoom: newZoom });
+      };
+
+      // { passive: false } permite usar preventDefault()
+      canvas.addEventListener('wheel', handleNativeWheel, { passive: false });
+      
+      return () => {
+          canvas.removeEventListener('wheel', handleNativeWheel);
+      };
+  }, []); // Array vacío para que solo se suscriba una vez
+
+  // 3. MOTOR DE RENDERIZADO (Canvas 2D)
+  const render = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !data) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Ajustar resolución
+    if (containerRef.current) {
+        if (canvas.width !== containerRef.current.clientWidth || canvas.height !== containerRef.current.clientHeight) {
+            canvas.width = containerRef.current.clientWidth;
+            canvas.height = containerRef.current.clientHeight;
+        }
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    ctx.save();
+    ctx.translate(camera.x, camera.y);
+    ctx.scale(camera.zoom, -camera.zoom); 
+
+    // Grosor Hilo Real: 1px de pantalla / zoom
+    const hairLine = 1 / camera.zoom; 
+    
+    data.polylines.forEach((poly, i) => {
+        if (poly.points.length < 2) return;
+
+        const isHovered = hoveredIndex === i;
+        const isCut = poly.layer === 'CUT';
+        
+        ctx.beginPath();
+        ctx.moveTo(poly.points[0].x, poly.points[0].y);
+        for (let j = 1; j < poly.points.length; j++) {
+            ctx.lineTo(poly.points[j].x, poly.points[j].y);
+        }
+        // Canvas no rellena a menos que se lo pidas con fill(). 
+        // Solo cerramos el trazo visualmente.
+        if (poly.closed) {
+            ctx.lineTo(poly.points[0].x, poly.points[0].y);
+        }
+
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        
+        if (isHovered) {
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = hairLine * 2; 
+        } else {
+            ctx.strokeStyle = isCut ? '#10b981' : '#ef4444';
+            ctx.lineWidth = hairLine; 
+        }
+        
+        ctx.stroke(); // Solo borde
+    });
+
+    // Textos
+    ctx.scale(1, -1); 
+    data.labels.forEach(lbl => {
+        ctx.fillStyle = '#fbbf24';
+        const fontSize = Math.max(lbl.height, 10 / camera.zoom); 
+        ctx.font = `bold ${fontSize}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.fillText(lbl.text, lbl.x, -lbl.y);
+    });
+
+    ctx.restore();
+
+  }, [data, camera, hoveredIndex]);
+
+  useEffect(() => {
+    requestAnimationFrame(render);
+  }, [render]);
+
+
+  // 4. INTERACCIÓN MOUSE (Solo Click y Move, la Rueda ya está arriba)
+  const handleMouseDown = (e: React.MouseEvent) => {
+      if (e.button === 0 || e.button === 1) { 
+          setIsDragging(true);
+          setLastMouse({ x: e.clientX, y: e.clientY });
+      }
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+      if (isDragging) {
+          const dx = e.clientX - lastMouse.x;
+          const dy = e.clientY - lastMouse.y;
+          updateCamera({ ...camera, x: camera.x + dx, y: camera.y + dy });
+          setLastMouse({ x: e.clientX, y: e.clientY });
+          return;
+      }
+
+      // Hover
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      const worldX = (mouseX - camera.x) / camera.zoom;
+      const worldY = -(mouseY - camera.y) / camera.zoom; 
+
+      const threshold = 5 / camera.zoom; 
+      
+      let foundIndex: number | null = null;
+      for (let i = 0; i < data.polylines.length; i++) {
+          const poly = data.polylines[i];
+          // Check rápido de BBox
+          if (poly.bbox) {
+             if (worldX < poly.bbox.minX - threshold || worldX > poly.bbox.maxX + threshold ||
+                 worldY < poly.bbox.minY - threshold || worldY > poly.bbox.maxY + threshold) {
+                 continue;
+             }
+          }
+          for (let j = 0; j < poly.points.length - 1; j++) {
+              const p1 = poly.points[j];
+              const p2 = poly.points[j+1];
+              if (distToSegment({x: worldX, y: worldY}, p1, p2) < threshold) {
+                  foundIndex = i;
+                  break;
+              }
+          }
+          if (foundIndex !== null) break;
+      }
+      setHoveredIndex(foundIndex);
+  };
+
+  const handleMouseUp = () => setIsDragging(false);
+
+  // Tecla A
+  useEffect(() => {
+      const handleKey = (e: KeyboardEvent) => {
+          if ((e.key === 'a' || e.key === 'A') && hoveredIndex !== null && onToggleLayer) {
+              onToggleLayer(hoveredIndex);
+          }
+      };
+      window.addEventListener('keydown', handleKey);
+      return () => window.removeEventListener('keydown', handleKey);
+  }, [hoveredIndex, onToggleLayer]);
+
+
+  if (!data) return <div className="h-full flex items-center justify-center text-red-500"><AlertTriangle /> Error Datos</div>;
 
   return (
-    <div ref={containerRef} className="relative w-full h-full bg-slate-950 overflow-hidden flex flex-col group focus:outline-none" tabIndex={0}>
-      
-      {/* Aviso */}
-      <div className="absolute top-4 right-4 z-40 pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity">
-          <div className="bg-black/60 backdrop-blur px-3 py-1 rounded text-[10px] text-slate-400 border border-slate-800">
-              [A] Cambiar Capa
-          </div>
-      </div>
-
-      {/* Info Consumo (Largo) */}
-      <div className="absolute top-4 left-4 z-50 pointer-events-none">
-        <div className="bg-black/80 backdrop-blur-md border-l-4 border-emerald-500 text-white px-4 py-2 rounded shadow-2xl">
-          <div className="flex items-center gap-2 text-slate-400 text-[10px] uppercase tracking-wider mb-1"><Ruler size={12} /> Consumo (Largo)</div>
-          <div className="font-mono text-xl font-bold">{data.stats.materialWidthYards.toFixed(2)} <span className="text-sm text-emerald-500">yd</span></div>
+    <div ref={containerRef} className="relative w-full h-full bg-slate-950 overflow-hidden cursor-crosshair">
+        
+        {/* Info Consumo */}
+        <div className="absolute top-4 left-4 z-50 pointer-events-none">
+            <div className="bg-black/80 backdrop-blur-md border-l-4 border-emerald-500 text-white px-4 py-2 rounded shadow-2xl">
+            <div className="flex items-center gap-2 text-slate-400 text-[10px] uppercase tracking-wider mb-1"><Ruler size={12} /> Consumo (Largo)</div>
+            <div className="font-mono text-xl font-bold">{data.stats.materialWidthYards.toFixed(2)} <span className="text-sm text-emerald-500">yd</span></div>
+            </div>
         </div>
-      </div>
 
-      <TransformWrapper initialScale={1} minScale={0.1} maxScale={100} centerOnInit={true} wheel={{ step: 0.2 }}>
-        {({ zoomIn, zoomOut, resetTransform, state }) => (
-            <>
-              {/* Controles Zoom */}
-              <div className="absolute bottom-6 right-6 flex flex-col gap-2 z-50">
-                <div className="bg-slate-800 text-slate-200 rounded-lg shadow-xl border border-slate-700 overflow-hidden flex flex-col">
-                  <button onClick={() => zoomIn()} className="p-3 hover:bg-slate-700"><ZoomIn size={20} /></button>
-                  <button onClick={() => zoomOut()} className="p-3 hover:bg-slate-700"><ZoomOut size={20} /></button>
-                  <button onClick={() => resetTransform()} className="p-3 hover:bg-slate-700"><Maximize size={20} /></button>
-                </div>
-              </div>
+        {/* Info Zoom */}
+        <div className="absolute bottom-4 left-4 z-50 pointer-events-none">
+             <div className="bg-black/50 px-2 py-1 rounded text-[10px] font-mono text-emerald-500 flex items-center gap-2">
+                <MousePointer2 size={10} /> {Math.round(camera.zoom * 100)}%
+             </div>
+        </div>
 
-              <div className="absolute bottom-6 left-6 z-50 pointer-events-none opacity-50">
-                  <div className="bg-black/50 px-2 py-1 rounded text-[10px] font-mono text-emerald-500 flex items-center gap-2"><MousePointer2 size={10} /> {Math.round((state?.scale || 1) * 100)}%</div>
-              </div>
+        {/* Aviso Tecla A */}
+        <div className="absolute top-4 right-4 z-40 pointer-events-none bg-black/60 px-3 py-1 rounded text-[10px] text-slate-400 border border-slate-800">
+            [A] Cambiar Capa | Rueda: Zoom | Click: Mover
+        </div>
 
-              <TransformComponent wrapperClass="!w-full !h-full" contentClass="!w-full !h-full">
-                <svg viewBox={renderData.viewBox} className="w-full h-full block" preserveAspectRatio="xMidYMid meet">
-                  
-                  {data.polylines.map((poly, i) => {
-                      const isHovered = hoveredIndex === i;
-                      const isCut = poly.layer === 'CUT';
-                      const color = isCut ? '#10b981' : '#ef4444';
-                      // Grosor de hilo (0.5), pero si pasas el mouse se hace un poco más grueso (2) para ver cuál seleccionas
-                      const strokeWidth = isHovered ? "2" : "0.5"; 
-                      
-                      return (
-                        <path
-                            key={i}
-                            d={`M ${poly.points.map(p => `${p.x},${p.y}`).join(' ')} ${poly.closed ? 'Z' : ''}`}
-                            fill="transparent"
-                            stroke={color}
-                            strokeWidth={strokeWidth}
-                            vectorEffect="non-scaling-stroke"
-                            className="transition-all cursor-pointer"
-                            onMouseEnter={() => setHoveredIndex(i)}
-                            onMouseLeave={() => setHoveredIndex(null)}
-                        />
-                      );
-                  })}
-
-                  {data.labels.map((lbl, i) => (
-                    <text key={`t-${i}`} x={lbl.x} y={lbl.y} fill="#fbbf24" fontSize={lbl.height * 1.5} textAnchor="middle" fontFamily="monospace" className="select-none font-bold pointer-events-none">
-                      {lbl.text}
-                    </text>
-                  ))}
-                </svg>
-              </TransformComponent>
-            </>
-        )}
-      </TransformWrapper>
+        <canvas
+            ref={canvasRef}
+            // NO USAMOS onWheel AQUÍ PARA EVITAR EL ERROR
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
+            className="block touch-none w-full h-full"
+        />
     </div>
   );
 };
+
+// Auxiliar
+function distToSegment(p: Point, v: Point, w: Point) {
+  const l2 = (v.x - w.x)**2 + (v.y - w.y)**2;
+  if (l2 === 0) return Math.hypot(p.x - v.x, p.y - v.y);
+  let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p.x - (v.x + t * (w.x - v.x)), p.y - (v.y + t * (w.y - v.y)));
+}

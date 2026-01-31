@@ -21,22 +21,24 @@ export interface ProcessedResult {
 
 export interface ProcessOptions {
     preserveFrame: boolean;
-    enableLabeling: boolean; // <--- Nuevo
+    enableLabeling: boolean;
 }
 
-const HEAL_TOLERANCE = 0.05;
-const MIN_ENTITY_LENGTH = 3.0;
-const GERBER_MIN_LENGTH = 0.5;
+// --- CONSTANTES ---
+const HEAL_TOLERANCE = 0.1; // Muy estricto
+const MIN_ENTITY_LENGTH = 0.1; // Muy sensible
 const TEXT_SIZE = 2.5; 
 const TEXT_OFFSET = 0.5;
 const YARDS_DIVISOR = 36.0;
 const SIZE_REGEX = /\b(XS|S|M|L|XL|2XL|3XL|YXS|YS|YM|YL|YXL|Y2XL|Y3XL|XSR|YSR|YMR|YLR|YXLR|Y2XLR)\b/i;
 
+// --- Helper Functions ---
 const distance = (p1: Point, p2: Point) => Math.hypot(p1.x - p2.x, p1.y - p2.y);
 
 const isCollinear = (p1: Point, p2: Point, p3: Point) => {
+  // Área del triángulo formado por los 3 puntos. Si es cerca de 0, son colineales.
   const area = p1.x * (p2.y - p3.y) + p2.x * (p3.y - p1.y) + p3.x * (p1.y - p2.y);
-  return Math.abs(area) < 1e-6;
+  return Math.abs(area) < 1e-4; // Tolerancia fina
 };
 
 const getPolylineLength = (points: Point[], closed: boolean): number => {
@@ -63,45 +65,77 @@ const getPolylineBounds = (points: Point[]) => {
   return { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
 };
 
+// Algoritmo Ray Casting Robusto
 const isPointInPolygon = (p: Point, polygon: Point[]) => {
   let inside = false;
   const x = p.x, y = p.y;
   for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
       const xi = polygon[i].x, yi = polygon[i].y;
       const xj = polygon[j].x, yj = polygon[j].y;
+      
       const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
       if (intersect) inside = !inside;
   }
   return inside;
 };
 
+// Verificación estricta: BBox + Punto
 const isPolyInsidePoly = (inner: Polyline, outer: Polyline): boolean => {
     const bIn = inner.bbox!; const bOut = outer.bbox!;
-    if (bIn.minX < bOut.minX || bIn.maxX > bOut.maxX || bIn.minY < bOut.minY || bIn.maxY > bOut.maxY) return false;
+    
+    // 1. Descarte rápido por caja (Bounding Box)
+    // Si la caja de adentro se sale aunque sea un poco de la caja de afuera, NO está dentro.
+    if (bIn.minX < bOut.minX - 0.001 || bIn.maxX > bOut.maxX + 0.001 || 
+        bIn.minY < bOut.minY - 0.001 || bIn.maxY > bOut.maxY + 0.001) return false;
+    
+    // 2. Verificación precisa (Ray Casting) con el primer punto
     return isPointInPolygon(inner.points[0], outer.points);
 };
+
+// --- CORE LOGIC ---
 
 const extractData = (dxf: any) => {
   const polylines: Polyline[] = [];
   const rawTexts: {x:number, y:number, text:string}[] = [];
+
   if (!dxf || !dxf.entities) return { polylines, rawTexts };
+
   dxf.entities.forEach((entity: any) => {
     if (entity.type === 'TEXT' || entity.type === 'MTEXT') {
         const content = (entity.text || '').trim();
         const match = content.match(SIZE_REGEX);
-        if (match) rawTexts.push({ x: entity.startPoint.x, y: entity.startPoint.y, text: match[0].toUpperCase() });
+        if (match) {
+            rawTexts.push({ x: entity.startPoint.x, y: entity.startPoint.y, text: match[0].toUpperCase() });
+        }
         return; 
     }
+
     let points: Point[] = [];
     let closed = false;
+
     if (entity.type === 'LINE') {
       points = [{ x: entity.vertices[0].x, y: entity.vertices[0].y }, { x: entity.vertices[1].x, y: entity.vertices[1].y }];
     } else if (entity.type === 'LWPOLYLINE' || entity.type === 'POLYLINE') {
       points = entity.vertices.map((v: any) => ({ x: v.x, y: v.y }));
-      closed = entity.shape === true || (entity.vertices.length > 2 && distance(points[0], points[points.length - 1]) < 0.001);
-      if (closed && points.length > 0 && distance(points[0], points[points.length - 1]) > 0.001) points.push({ ...points[0] });
+      // Detectar cierre por flag o por proximidad
+      closed = entity.shape === true || (entity.vertices.length > 2 && distance(points[0], points[points.length - 1]) < HEAL_TOLERANCE);
+      // Si está cerrado visualmente pero los puntos no son idénticos, cerrar explícitamente
+      if (closed && points.length > 0 && distance(points[0], points[points.length - 1]) > 0.0001) {
+          points.push({ ...points[0] });
+      }
     }
-    if (points.length > 0) polylines.push({ points, closed, id: Math.random().toString(36).substr(2, 9), originalLayer: entity.layer });
+
+    if (points.length > 0) {
+      // Limpieza de puntos duplicados consecutivos (ruido)
+      const cleanPoints = [points[0]];
+      for(let i=1; i<points.length; i++) {
+          if (distance(points[i], cleanPoints[cleanPoints.length-1]) > 0.0001) {
+              cleanPoints.push(points[i]);
+          }
+      }
+      
+      polylines.push({ points: cleanPoints, closed, id: Math.random().toString(36).substr(2, 9), originalLayer: entity.layer });
+    }
   });
   return { polylines, rawTexts };
 };
@@ -113,26 +147,48 @@ const healPolylines = (input: Polyline[]): Polyline[] => {
     changed = false;
     const nextPolylines: Polyline[] = [];
     const used = new Set<number>();
+    
     for (let i = 0; i < polylines.length; i++) {
       if (used.has(i)) continue;
       let current = polylines[i];
       used.add(i);
+      
       if (current.closed) { nextPolylines.push(current); continue; }
+      
       let merged = true;
       while (merged) {
         merged = false;
-        const start = current.points[0]; const end = current.points[current.points.length - 1];
+        const start = current.points[0]; 
+        const end = current.points[current.points.length - 1];
+        
         for (let j = 0; j < polylines.length; j++) {
           if (used.has(j)) continue;
           const target = polylines[j];
           if (target.closed) continue;
-          const tStart = target.points[0]; const tEnd = target.points[target.points.length - 1];
-          if (distance(end, tStart) <= HEAL_TOLERANCE) { current.points = [...current.points, ...target.points.slice(1)]; used.add(j); merged = true; break; }
-          if (distance(end, tEnd) <= HEAL_TOLERANCE) { current.points = [...current.points, ...target.points.reverse().slice(1)]; used.add(j); merged = true; break; }
-          if (distance(start, tEnd) <= HEAL_TOLERANCE) { current.points = [...target.points, ...current.points.slice(1)]; used.add(j); merged = true; break; }
-          if (distance(start, tStart) <= HEAL_TOLERANCE) { current.points = [...target.points.reverse(), ...current.points.slice(1)]; used.add(j); merged = true; break; }
+          
+          const tStart = target.points[0]; 
+          const tEnd = target.points[target.points.length - 1];
+          
+          // Fusión estricta
+          if (distance(end, tStart) <= HEAL_TOLERANCE) { 
+              current.points = [...current.points, ...target.points.slice(1)]; used.add(j); merged = true; break; 
+          }
+          if (distance(end, tEnd) <= HEAL_TOLERANCE) { 
+              current.points = [...current.points, ...target.points.reverse().slice(1)]; used.add(j); merged = true; break; 
+          }
+          if (distance(start, tEnd) <= HEAL_TOLERANCE) { 
+              current.points = [...target.points, ...current.points.slice(1)]; used.add(j); merged = true; break; 
+          }
+          if (distance(start, tStart) <= HEAL_TOLERANCE) { 
+              current.points = [...target.points.reverse(), ...current.points.slice(1)]; used.add(j); merged = true; break; 
+          }
         }
-        if (distance(current.points[0], current.points[current.points.length - 1]) <= HEAL_TOLERANCE) { current.closed = true; current.points[current.points.length - 1] = { ...current.points[0] }; }
+        
+        // Auto-cierre
+        if (distance(current.points[0], current.points[current.points.length - 1]) <= HEAL_TOLERANCE) { 
+            current.closed = true; 
+            current.points[current.points.length - 1] = { ...current.points[0] }; 
+        }
       }
       nextPolylines.push(current);
     }
@@ -147,7 +203,9 @@ const removeCollinearKnots = (polylines: Polyline[]): Polyline[] => {
     if (poly.points.length < 3) return poly;
     const newPoints = [poly.points[0]];
     for (let i = 1; i < poly.points.length - 1; i++) {
-      if (!isCollinear(poly.points[i - 1], poly.points[i], poly.points[i + 1])) newPoints.push(poly.points[i]);
+      if (!isCollinear(poly.points[i - 1], poly.points[i], poly.points[i + 1])) {
+          newPoints.push(poly.points[i]);
+      }
     }
     newPoints.push(poly.points[poly.points.length - 1]);
     return { ...poly, points: newPoints };
@@ -157,8 +215,8 @@ const removeCollinearKnots = (polylines: Polyline[]): Polyline[] => {
 const filterDebris = (polylines: Polyline[], isGerber: boolean): Polyline[] => {
   return polylines.filter(poly => {
     const length = getPolylineLength(poly.points, poly.closed);
-    const tolerance = (isGerber && poly.originalLayer === 'T001L001') ? GERBER_MIN_LENGTH : MIN_ENTITY_LENGTH;
-    return length >= tolerance;
+    // Filtro unificado a 0.1mm (o lo que definimos arriba) para no perder piquetes
+    return length >= MIN_ENTITY_LENGTH;
   });
 };
 
@@ -169,8 +227,14 @@ const detectFrame = (polylines: Polyline[]): string | null => {
     if (!poly.closed) return;
     const bounds = getPolylineBounds(poly.points);
     const area = bounds.width * bounds.height;
-    if (area > maxArea && bounds.width > 50) { maxArea = area; frameId = poly.id; }
+    // Un marco debe ser significativamente grande
+    if (area > maxArea && bounds.width > 50) { 
+      maxArea = area;
+      frameId = poly.id;
+    }
   });
+  
+  // Validación extra: El marco debe contener al menos otra pieza
   if (frameId) {
       const frame = polylines.find(p => p.id === frameId);
       const hasChildren = polylines.some(p => p.id !== frameId && isPointInPolygon(p.points[0], frame!.points));
@@ -179,6 +243,7 @@ const detectFrame = (polylines: Polyline[]): string | null => {
   return frameId;
 };
 
+// --- ÁRBOL DE JERARQUÍA ---
 interface TreeNode { poly: Polyline; children: TreeNode[]; }
 
 const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[] => {
@@ -187,27 +252,49 @@ const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[]
         bbox: getPolylineBounds(p.points),
         area: p.closed ? calculatePolygonArea(p.points) : 0
     }));
+
     const result: Polyline[] = [];
+
+    // 1. Marco -> ROJO
     const frame = enrichedPolylines.find(p => p.id === frameId);
     if (frame) result.push({ ...frame, layer: 'BOARDS' }); 
-    const openLines = enrichedPolylines.filter(p => !p.closed && p.id !== frameId).map(p => ({ ...p, layer: 'BOARDS' }));
+
+    // 2. Líneas Abiertas -> ROJO (Siempre)
+    const openLines = enrichedPolylines.filter(p => !p.closed && p.id !== frameId).map(p => ({
+        ...p, layer: 'BOARDS'
+    }));
     result.push(...openLines);
+
+    // 3. Contornos Cerrados -> ÁRBOL LÓGICO
     const closedLines = enrichedPolylines.filter(p => p.closed && p.id !== frameId);
+    
+    // Ordenar Mayor a Menor (CRUCIAL)
     closedLines.sort((a, b) => b.area! - a.area!);
+
     const roots: TreeNode[] = [];
+
+    // Inserción recursiva
     const insertIntoTree = (node: TreeNode, siblings: TreeNode[]): boolean => {
         for (const sibling of siblings) {
             if (isPolyInsidePoly(node.poly, sibling.poly)) {
-                if (!insertIntoTree(node, sibling.children)) sibling.children.push(node);
+                if (!insertIntoTree(node, sibling.children)) {
+                    sibling.children.push(node);
+                }
                 return true; 
             }
         }
         return false;
     };
+
     closedLines.forEach(poly => {
         const node: TreeNode = { poly, children: [] };
-        if (!insertIntoTree(node, roots)) roots.push(node);
+        // Intentar meter en raíces existentes
+        if (!insertIntoTree(node, roots)) {
+            roots.push(node);
+        }
     });
+
+    // Coloreado por profundidad (Par=Corte, Impar=Interno)
     const traverseAndColor = (nodes: TreeNode[], depth: number) => {
         nodes.forEach(node => {
             const layer = depth % 2 === 0 ? 'CUT' : 'BOARDS';
@@ -215,11 +302,15 @@ const assignLayers = (polylines: Polyline[], frameId: string | null): Polyline[]
             traverseAndColor(node.children, depth + 1);
         });
     };
+
     traverseAndColor(roots, 0);
+
     return result;
 };
 
 const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number, text:string}[]): TextEntity[] => {
+    // ... (Logica de etiquetas igual) ...
+    // Para ahorrar espacio, dejo esto igual ya que funciona bien
     const dividers: number[] = [];
     polylines.forEach(p => {
         if (!p.bbox) p.bbox = getPolylineBounds(p.points);
@@ -261,7 +352,7 @@ const groupLabelsByZones = (polylines: Polyline[], rawTexts: {x:number, y:number
     return finalLabels;
 };
 
-// FUNCIÓN PRINCIPAL
+// --- MAIN PROCESS ---
 export const processDxf = (dxfString: string, options: ProcessOptions = { preserveFrame: true, enableLabeling: true }): ProcessedResult => {
   const isGerber = dxfString.includes("Gerber Technology");
   const parser = new DxfParser();
@@ -282,7 +373,6 @@ export const processDxf = (dxfString: string, options: ProcessOptions = { preser
   processed = assignLayers(processed, frameId);
   
   let finalLabels: TextEntity[] = [];
-  // FILTRO DE ETIQUETAS
   if (options.enableLabeling && isGerber && rawTexts.length > 0) {
       finalLabels = groupLabelsByZones(processed, rawTexts);
   }
